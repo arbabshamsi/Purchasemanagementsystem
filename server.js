@@ -5,18 +5,36 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 
 const config = require('./src/config');
-const dbModule = require('./src/db');
+const { ensureReady } = require('./src/db');
 const { attachUser } = require('./src/auth');
 
-// Initialise database (schema + seed) before anything else.
-dbModule.init();
-
 const app = express();
+app.set('trust proxy', 1); // behind Vercel's proxy
 app.disable('x-powered-by');
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-app.use(attachUser);
+
+// Health check — no database dependency, so it works even before DATABASE_URL
+// is configured. Useful to confirm the deployment itself is healthy.
+app.get('/api/health', (req, res) =>
+  res.json({ ok: true, hasDb: !!config.databaseUrl, time: new Date().toISOString() })
+);
+
+// Ensure the database schema + seed exist before handling API calls.
+// Memoised in db.js, so this is effectively a no-op after the first request.
+app.use('/api', async (req, res, next) => {
+  try {
+    await ensureReady();
+    next();
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[db-init]', err.message);
+    res.status(503).json({ error: 'Database is not reachable. Check the DATABASE_URL configuration.' });
+  }
+});
+
+app.use('/api', attachUser);
 
 // API routes
 app.use('/api/auth', require('./src/routes/auth'));
@@ -27,30 +45,30 @@ app.use('/api/rate-lists', require('./src/routes/rateLists'));
 app.use('/api/purchase-orders', require('./src/routes/purchaseOrders'));
 app.use('/api/users', require('./src/routes/users'));
 
-app.get('/api/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
-
-// Static frontend
+// Static frontend (used for local dev; on Vercel static files are served by the CDN).
 app.use(express.static(path.join(__dirname, 'public')));
-
-// SPA fallback: send index.html for any non-API GET that isn't a static file.
 app.get(/^(?!\/api\/).*/, (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Central error handler (covers multer file-size errors etc.).
+// Central error handler.
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   // eslint-disable-next-line no-console
-  console.error('[error]', err.message);
-  if (err.code === 'LIMIT_FILE_SIZE') {
+  console.error('[error]', err && err.message);
+  if (err && err.code === 'LIMIT_FILE_SIZE') {
     return res.status(413).json({ error: 'File is too large (max 5 MB)' });
   }
-  res.status(err.status || 500).json({ error: err.message || 'Server error' });
+  res.status((err && err.status) || 500).json({ error: (err && err.message) || 'Server error' });
 });
 
-const server = app.listen(config.port, config.host, () => {
-  // eslint-disable-next-line no-console
-  console.log(`Purchase Management System running on http://${config.host}:${config.port}`);
-});
+// Only start a listener when run directly (local dev). On Vercel the app is
+// imported by api/index.js and invoked per-request.
+if (require.main === module) {
+  app.listen(config.port, config.host, () => {
+    // eslint-disable-next-line no-console
+    console.log(`Purchase Management System running on http://${config.host}:${config.port}`);
+  });
+}
 
-module.exports = { app, server };
+module.exports = { app };

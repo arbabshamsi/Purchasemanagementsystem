@@ -2,71 +2,67 @@
 
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
-const { db } = require('./db');
+const { query, one, run, S } = require('./db');
 const config = require('./config');
 
 /** Create a session for a user and return the opaque token. */
-function createSession(userId) {
+async function createSession(userId) {
   const token = crypto.randomBytes(32).toString('hex');
-  const expiresAt = new Date(Date.now() + config.sessionTtlMs)
-    .toISOString()
-    .replace('T', ' ')
-    .slice(0, 19);
-  db.prepare(
-    'INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)'
-  ).run(token, userId, expiresAt);
+  const expiresAt = new Date(Date.now() + config.sessionTtlMs);
+  await run(
+    `INSERT INTO ${S}.sessions (token, user_id, expires_at) VALUES ($1,$2,$3)`,
+    [token, userId, expiresAt]
+  );
   return token;
 }
 
-function destroySession(token) {
+async function destroySession(token) {
   if (!token) return;
-  db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  await run(`DELETE FROM ${S}.sessions WHERE token = $1`, [token]);
 }
 
-/** Look up a user by a valid, unexpired session token. Returns null if none. */
-function userFromToken(token) {
+/** Resolve a user from a valid, unexpired session token, or null. */
+async function userFromToken(token) {
   if (!token) return null;
-  const row = db
-    .prepare(
-      `SELECT u.id, u.name, u.email, u.role, u.active
-         FROM sessions s
-         JOIN users u ON u.id = s.user_id
-        WHERE s.token = ?
-          AND s.expires_at >= datetime('now')`
-    )
-    .get(token);
+  const row = await one(
+    `SELECT u.id, u.name, u.email, u.role, u.active
+       FROM ${S}.sessions s
+       JOIN ${S}.users u ON u.id = s.user_id
+      WHERE s.token = $1 AND s.expires_at >= now()`,
+    [token]
+  );
   if (!row || !row.active) return null;
   return row;
 }
 
-/** Verify email + password and return the user record (without hash) or null. */
-function verifyLogin(email, password) {
-  const user = db
-    .prepare('SELECT * FROM users WHERE email = ? AND active = 1')
-    .get(String(email || '').trim().toLowerCase());
+/** Verify email + password; returns the user (without hash) or null. */
+async function verifyLogin(email, password) {
+  const user = await one(
+    `SELECT * FROM ${S}.users WHERE email = $1 AND active = true`,
+    [String(email || '').trim().toLowerCase()]
+  );
   if (!user) return null;
   if (!bcrypt.compareSync(password || '', user.password_hash)) return null;
   return { id: user.id, name: user.name, email: user.email, role: user.role };
 }
 
-/**
- * Express middleware that attaches req.user when a valid session cookie is
- * present. Never rejects — route guards decide what to do when req.user is null.
- */
-function attachUser(req, res, next) {
-  const token = req.cookies ? req.cookies[config.sessionCookie] : null;
-  req.sessionToken = token || null;
-  req.user = userFromToken(token);
+/** Attach req.user when a valid session cookie is present (never rejects). */
+async function attachUser(req, res, next) {
+  try {
+    const token = req.cookies ? req.cookies[config.sessionCookie] : null;
+    req.sessionToken = token || null;
+    req.user = await userFromToken(token);
+  } catch (err) {
+    req.user = null;
+  }
   next();
 }
 
-/** Guard requiring an authenticated user. */
 function requireAuth(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Authentication required' });
   next();
 }
 
-/** Guard requiring one of the given roles (admin always allowed). */
 function requireRole(...roles) {
   return (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: 'Authentication required' });

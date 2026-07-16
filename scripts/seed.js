@@ -1,88 +1,101 @@
 'use strict';
 
 /**
- * Optional demo-data seeder. Adds sample suppliers, items, a rate list and a
- * couple of purchase orders so the app has something to show on first run.
- * Safe to re-run: it only inserts when the tables are empty.
+ * Optional demo-data seeder. Adds sample suppliers, items, rate lists and
+ * purchase orders so the app has something to show. Safe to re-run: it only
+ * inserts when there are no suppliers yet.
  *
  *   npm run seed
  */
 
-const { db, init } = require('../src/db');
+const { query, one, run, tx, ensureReady, S } = require('../src/db');
 
-init();
+(async () => {
+  await ensureReady();
 
-const supplierCount = db.prepare('SELECT COUNT(*) AS n FROM suppliers').get().n;
-if (supplierCount > 0) {
-  console.log('[seed] Suppliers already exist — skipping demo data.');
+  const supplierCount = await one(`SELECT COUNT(*)::int AS n FROM ${S}.suppliers`);
+  if (supplierCount.n > 0) {
+    console.log('[seed] Suppliers already exist — skipping demo data.');
+    process.exit(0);
+  }
+
+  const admin = await one(`SELECT id FROM ${S}.users WHERE role = 'admin' ORDER BY id LIMIT 1`);
+  const adminId = admin ? admin.id : null;
+  const paramount = await one(`SELECT id FROM ${S}.companies WHERE code = 'PARAMOUNT'`);
+  const aia = await one(`SELECT id FROM ${S}.companies WHERE code = 'AIA'`);
+
+  await tx(async (c) => {
+    const supA = await c.one(
+      `INSERT INTO ${S}.suppliers (name, contact_person, email, phone) VALUES ($1,$2,$3,$4) RETURNING id`,
+      ['Al-Karam Textiles', 'Bilal Ahmed', 'sales@alkaram.example', '+92 300 1234567']
+    );
+    const supB = await c.one(
+      `INSERT INTO ${S}.suppliers (name, contact_person, email, phone) VALUES ($1,$2,$3,$4) RETURNING id`,
+      ['Gulberg Ceramics', 'Sana Riaz', 'orders@gulbergceramics.example', '+92 321 7654321']
+    );
+
+    const itemDefs = [
+      ['Cotton Bath Towel', 'TWL-BATH', 'pcs', 'Linen'],
+      ['Cotton Hand Towel', 'TWL-HAND', 'pcs', 'Linen'],
+      ['Ceramic Dinner Plate 10in', 'PLT-10', 'pcs', 'Tableware'],
+      ['Ceramic Soup Bowl', 'BWL-SOUP', 'pcs', 'Tableware'],
+      ['Stainless Steel Spoon', 'SPN-01', 'dozen', 'Cutlery'],
+    ];
+    const items = [];
+    for (const [name, sku, unit, category] of itemDefs) {
+      const it = await c.one(
+        `INSERT INTO ${S}.items (name, sku, unit, category) VALUES ($1,$2,$3,$4) RETURNING id`,
+        [name, sku, unit, category]
+      );
+      items.push(it.id);
+    }
+
+    const rlA = await c.one(
+      `INSERT INTO ${S}.rate_lists (title, supplier_id, currency, effective_date, status, created_by)
+       VALUES ($1,$2,'PKR',current_date,'active',$3) RETURNING id`,
+      ['Al-Karam Textiles — 2026 prices', supA.id, adminId]
+    );
+    await c.run(`INSERT INTO ${S}.rate_list_items (rate_list_id, item_id, rate, unit) VALUES ($1,$2,850,'pcs'),($1,$3,420,'pcs')`, [rlA.id, items[0], items[1]]);
+
+    const rlB = await c.one(
+      `INSERT INTO ${S}.rate_lists (title, supplier_id, currency, effective_date, status, created_by)
+       VALUES ($1,$2,'PKR',current_date,'active',$3) RETURNING id`,
+      ['Gulberg Ceramics — tableware', supB.id, adminId]
+    );
+    await c.run(`INSERT INTO ${S}.rate_list_items (rate_list_id, item_id, rate, unit) VALUES ($1,$2,320,'pcs'),($1,$3,260,'pcs'),($1,$4,540,'dozen')`, [rlB.id, items[2], items[3], items[4]]);
+
+    const year = new Date().getFullYear();
+    async function createPo(number, companyId, supplierId, status, lines) {
+      const subtotal = lines.reduce((s, l) => s + l.qty * l.rate, 0);
+      const po = await c.one(
+        `INSERT INTO ${S}.purchase_orders (po_number, company_id, supplier_id, status, currency, subtotal, tax_percent, tax_amount, total, created_by)
+         VALUES ($1,$2,$3,$4,'PKR',$5,0,0,$5,$6) RETURNING id`,
+        [number, companyId, supplierId, status, subtotal, adminId]
+      );
+      for (const l of lines) {
+        await c.run(
+          `INSERT INTO ${S}.po_items (po_id, item_id, description, quantity, rate, amount) VALUES ($1,$2,$3,$4,$5,$6)`,
+          [po.id, l.itemId, l.desc, l.qty, l.rate, l.qty * l.rate]
+        );
+      }
+      await c.run(`INSERT INTO ${S}.po_history (po_id, action, note, user_id) VALUES ($1,'created','Demo PO',$2)`, [po.id, adminId]);
+      if (status === 'pending') {
+        await c.run(`INSERT INTO ${S}.po_history (po_id, action, note, user_id) VALUES ($1,'submitted','Submitted for approval',$2)`, [po.id, adminId]);
+      }
+    }
+
+    await createPo(`PARAMOUNT-${year}-0001`, paramount.id, supA.id, 'pending', [
+      { itemId: items[0], desc: 'Cotton Bath Towel', qty: 100, rate: 850 },
+      { itemId: items[1], desc: 'Cotton Hand Towel', qty: 200, rate: 420 },
+    ]);
+    await createPo(`AIA-${year}-0001`, aia.id, supB.id, 'draft', [
+      { itemId: items[2], desc: 'Ceramic Dinner Plate 10in', qty: 150, rate: 320 },
+    ]);
+  });
+
+  console.log('[seed] Demo data created: 2 suppliers, 5 items, 2 rate lists, 2 purchase orders.');
   process.exit(0);
-}
-
-const admin = db.prepare("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").get();
-const paramount = db.prepare("SELECT id FROM companies WHERE code = 'PARAMOUNT'").get();
-const aia = db.prepare("SELECT id FROM companies WHERE code = 'AIA'").get();
-
-const insertSupplier = db.prepare(
-  'INSERT INTO suppliers (name, contact_person, email, phone) VALUES (?, ?, ?, ?)'
-);
-const alkaram = insertSupplier.run('Al-Karam Textiles', 'Bilal Ahmed', 'sales@alkaram.example', '+92 300 1234567').lastInsertRowid;
-const gulberg = insertSupplier.run('Gulberg Ceramics', 'Sana Riaz', 'orders@gulbergceramics.example', '+92 321 7654321').lastInsertRowid;
-
-const insertItem = db.prepare('INSERT INTO items (name, sku, unit, category) VALUES (?, ?, ?, ?)');
-const items = [
-  ['Cotton Bath Towel', 'TWL-BATH', 'pcs', 'Linen'],
-  ['Cotton Hand Towel', 'TWL-HAND', 'pcs', 'Linen'],
-  ['Ceramic Dinner Plate 10in', 'PLT-10', 'pcs', 'Tableware'],
-  ['Ceramic Soup Bowl', 'BWL-SOUP', 'pcs', 'Tableware'],
-  ['Stainless Steel Spoon', 'SPN-01', 'dozen', 'Cutlery'],
-].map((row) => insertItem.run(...row).lastInsertRowid);
-
-// Rate list for Al-Karam (towels)
-const rlResult = db
-  .prepare(
-    `INSERT INTO rate_lists (title, supplier_id, company_id, currency, effective_date, status, created_by)
-     VALUES (?, ?, ?, 'PKR', date('now'), 'active', ?)`
-  )
-  .run('Al-Karam Textiles — 2026 prices', alkaram, null, admin ? admin.id : null);
-const rlId = rlResult.lastInsertRowid;
-const rlItem = db.prepare('INSERT INTO rate_list_items (rate_list_id, item_id, rate, unit) VALUES (?, ?, ?, ?)');
-rlItem.run(rlId, items[0], 850, 'pcs');
-rlItem.run(rlId, items[1], 420, 'pcs');
-
-// Rate list for Gulberg (tableware)
-const rl2 = db
-  .prepare(
-    `INSERT INTO rate_lists (title, supplier_id, company_id, currency, effective_date, status, created_by)
-     VALUES (?, ?, ?, 'PKR', date('now'), 'active', ?)`
-  )
-  .run('Gulberg Ceramics — tableware', gulberg, null, admin ? admin.id : null).lastInsertRowid;
-rlItem.run(rl2, items[2], 320, 'pcs');
-rlItem.run(rl2, items[3], 260, 'pcs');
-rlItem.run(rl2, items[4], 540, 'dozen');
-
-// A pending PO for Paramount
-function createPo(number, companyId, supplierId, status, lines) {
-  const subtotal = lines.reduce((s, l) => s + l.qty * l.rate, 0);
-  const po = db
-    .prepare(
-      `INSERT INTO purchase_orders (po_number, company_id, supplier_id, status, currency, subtotal, tax_percent, tax_amount, total, created_by)
-       VALUES (?, ?, ?, ?, 'PKR', ?, 0, 0, ?, ?)`
-    )
-    .run(number, companyId, supplierId, status, subtotal, subtotal, admin ? admin.id : null).lastInsertRowid;
-  const li = db.prepare('INSERT INTO po_items (po_id, item_id, description, quantity, rate, amount) VALUES (?, ?, ?, ?, ?, ?)');
-  for (const l of lines) li.run(po, l.itemId, l.desc, l.qty, l.rate, l.qty * l.rate);
-  db.prepare('INSERT INTO po_history (po_id, action, note, user_id) VALUES (?, ?, ?, ?)').run(po, 'created', 'Demo PO', admin ? admin.id : null);
-  if (status === 'pending') db.prepare('INSERT INTO po_history (po_id, action, note, user_id) VALUES (?, ?, ?, ?)').run(po, 'submitted', 'Submitted for approval', admin ? admin.id : null);
-  return po;
-}
-
-const year = new Date().getFullYear();
-createPo(`PARAMOUNT-${year}-0001`, paramount.id, alkaram, 'pending', [
-  { itemId: items[0], desc: 'Cotton Bath Towel', qty: 100, rate: 850 },
-  { itemId: items[1], desc: 'Cotton Hand Towel', qty: 200, rate: 420 },
-]);
-createPo(`AIA-${year}-0001`, aia.id, gulberg, 'draft', [
-  { itemId: items[2], desc: 'Ceramic Dinner Plate 10in', qty: 150, rate: 320 },
-]);
-
-console.log('[seed] Demo data created: 2 suppliers, 5 items, 2 rate lists, 2 purchase orders.');
+})().catch((err) => {
+  console.error('[seed] Failed:', err.message);
+  process.exit(1);
+});
