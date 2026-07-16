@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Purchase Management System</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="/css/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧾</text></svg>" />
+</head>
+<body>
+  <!-- Login screen -->
+  <div id="login-screen" class="login-screen hidden">
+    <div class="login-card">
+      <div class="login-brand">
+        <div class="login-logo">🧾</div>
+        <h1>Purchase Management</h1>
+        <p>Paramount &amp; AiA — rate lists and PO approvals</p>
+      </div>
+      <form id="login-form">
+        <label>Email
+          <input type="email" name="email" autocomplete="username" required placeholder="admin@paramount.local" />
+        </label>
+        <label>Password
+          <input type="password" name="password" autocomplete="current-password" required placeholder="••••••••" />
+        </label>
+        <div id="login-error" class="form-error"></div>
+        <button type="submit" class="btn btn-primary btn-block">Sign in</button>
+      </form>
+      <p class="login-hint">Default admin: <code>admin@paramount.local</code> / <code>admin123</code></p>
+    </div>
+  </div>
+
+  <!-- Main app -->
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-logo">🧾</span>
+        <span class="brand-text">Purchase MS</span>
+      </div>
+      <nav id="nav" class="nav"></nav>
+      <div class="sidebar-footer">
+        <div id="user-box" class="user-box"></div>
+        <button id="logout-btn" class="btn btn-ghost btn-sm">Sign out</button>
+      </div>
+    </aside>
+    <main class="content">
+      <header class="topbar">
+        <button id="menu-toggle" class="menu-toggle" aria-label="Menu">☰</button>
+        <h2 id="page-title">Dashboard</h2>
+        <div id="topbar-actions" class="topbar-actions"></div>
+      </header>
+      <div id="view" class="view"></div>
+    </main>
+    <div id="scrim" class="scrim hidden"></div>
+  </div>
+
+  <!-- Modal host -->
+  <div id="modal-host" class="modal-host hidden">
+    <div class="modal-backdrop"></div>
+    <div id="modal" class="modal" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <!-- Toasts -->
+  <div id="toasts" class="toasts"></div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
