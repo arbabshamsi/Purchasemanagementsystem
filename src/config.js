@@ -18,7 +18,12 @@ const config = {
   // B) Advanced: provide a full connection string in DATABASE_URL, which
   //    overrides A). Used for local development.
   databaseUrl: process.env.DATABASE_URL || '',
-  supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '',
+  // Falls back to the project's public API URL (the ref is public, not a
+  // secret) so that only the service-role key needs to be configured.
+  supabaseUrl:
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    'https://gikdfwlrqbkubasufdcq.supabase.co',
   // Preferred in production: Supabase URL + service-role key (no DB password
   // needed). The app talks to the database through SECURITY DEFINER RPCs.
   supabaseServiceKey: process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || '',
