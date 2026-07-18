@@ -18,7 +18,12 @@ app.use(cookieParser());
 // Health check — no database dependency, so it works even before DATABASE_URL
 // is configured. Useful to confirm the deployment itself is healthy.
 app.get('/api/health', (req, res) =>
-  res.json({ ok: true, hasDb: !!config.databaseUrl, time: new Date().toISOString() })
+  res.json({
+    ok: true,
+    hasDb: !!(config.databaseUrl || config.supabaseDbPassword),
+    dbMode: config.supabaseDbPassword ? 'supabase-pieces' : config.databaseUrl ? 'database-url' : 'none',
+    time: new Date().toISOString(),
+  })
 );
 
 // Ensure the database schema + seed exist before handling API calls.

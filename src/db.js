@@ -12,31 +12,95 @@ types.setTypeParser(1700, (v) => (v === null ? null : parseFloat(v)));
 // date           -> keep the raw 'YYYY-MM-DD' string (avoids timezone shifts)
 types.setTypeParser(1082, (v) => v);
 
-const isLocal = /localhost|127\.0\.0\.1|::1/.test(config.databaseUrl);
-
-const pool = new Pool({
-  connectionString: config.databaseUrl,
-  ssl: isLocal || !config.databaseUrl ? false : { rejectUnauthorized: false },
-  max: parseInt(process.env.PG_POOL_MAX, 10) || 5,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 15000,
-});
-
 const S = config.dbSchema; // schema name, e.g. "pms"
+
+/** Extract the project ref from a Supabase URL (https://<ref>.supabase.co). */
+function extractRef(url) {
+  const m = String(url || '').match(/https?:\/\/([a-z0-9]+)\.supabase\.(co|in|net)/i);
+  return m ? m[1] : '';
+}
+
+/**
+ * Build the list of candidate connection strings to try, in order.
+ * - If DATABASE_URL is set, use it (local dev / manual override).
+ * - Otherwise build the Supabase transaction-pooler URL from the project ref
+ *   (taken from the Supabase URL) + the database password. The pooler host can
+ *   be either aws-0-<region> or aws-1-<region>, so both are tried.
+ * The password is URL-encoded, so special characters are always safe.
+ */
+function connectionCandidates() {
+  if (config.supabaseDbPassword) {
+    const ref = extractRef(config.supabaseUrl);
+    if (!ref) {
+      throw new Error(
+        'SUPABASE_DB_PASSWORD is set but the Supabase URL is missing/invalid. ' +
+          'Set NEXT_PUBLIC_SUPABASE_URL to https://<ref>.supabase.co'
+      );
+    }
+    const pw = encodeURIComponent(config.supabaseDbPassword);
+    const port = config.supabasePoolerPort;
+    const hosts = config.supabasePoolerHost
+      ? [config.supabasePoolerHost]
+      : [
+          `aws-0-${config.supabaseRegion}.pooler.supabase.com`,
+          `aws-1-${config.supabaseRegion}.pooler.supabase.com`,
+        ];
+    return hosts.map((h) => `postgresql://postgres.${ref}:${pw}@${h}:${port}/postgres`);
+  }
+  if (config.databaseUrl) return [config.databaseUrl];
+  return [];
+}
+
+let poolPromise = null;
+
+/** Lazily create (and cache) the connection pool, picking a host that works. */
+function getPool() {
+  if (poolPromise) return poolPromise;
+  poolPromise = (async () => {
+    const candidates = connectionCandidates();
+    if (!candidates.length) {
+      throw new Error('No database configured. Set SUPABASE_DB_PASSWORD (+ Supabase URL) or DATABASE_URL.');
+    }
+    let lastErr;
+    for (const connectionString of candidates) {
+      const local = /localhost|127\.0\.0\.1|::1/.test(connectionString);
+      const candidate = new Pool({
+        connectionString,
+        ssl: local ? false : { rejectUnauthorized: false },
+        max: parseInt(process.env.PG_POOL_MAX, 10) || 5,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 15000,
+      });
+      try {
+        await candidate.query('SELECT 1');
+        return candidate; // this connection string works
+      } catch (err) {
+        lastErr = err;
+        await candidate.end().catch(() => {});
+      }
+    }
+    poolPromise = null; // let a later request retry
+    throw lastErr || new Error('Could not connect to the database');
+  })();
+  return poolPromise;
+}
 
 /** Run a query and return the rows. */
 async function query(text, params) {
-  const res = await pool.query(text, params);
+  const p = await getPool();
+  const res = await p.query(text, params);
   return res.rows;
 }
 /** Run a query and return the first row (or null). */
 async function one(text, params) {
-  const res = await pool.query(text, params);
+  const p = await getPool();
+  const res = await p.query(text, params);
   return res.rows[0] || null;
 }
 /** Run a query and return the raw result (rowCount, etc.). */
 async function run(text, params) {
-  return pool.query(text, params);
+  const p = await getPool();
+  return p.query(text, params);
 }
 
 /**
@@ -44,7 +108,8 @@ async function run(text, params) {
  * same query/one/run interface so every statement uses the same connection.
  */
 async function tx(fn) {
-  const client = await pool.connect();
+  const p = await getPool();
+  const client = await p.connect();
   const helper = {
     query: async (t, p) => (await client.query(t, p)).rows,
     one: async (t, p) => (await client.query(t, p)).rows[0] || null,
@@ -213,4 +278,4 @@ function ensureReady() {
   return readyPromise;
 }
 
-module.exports = { pool, query, one, run, tx, ensureReady, S };
+module.exports = { getPool, query, one, run, tx, ensureReady, S, connectionCandidates, extractRef };

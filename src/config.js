@@ -6,9 +6,25 @@ const config = {
   host: process.env.HOST || '0.0.0.0',
   nodeEnv: process.env.NODE_ENV || 'development',
 
-  // Postgres connection string (Supabase in production).
-  // Example: postgresql://user:pass@host:6543/postgres
+  // --- Database connection ---
+  // Two supported ways to configure the Postgres (Supabase) connection:
+  //
+  // A) Simple: give the app your Supabase URL + database password as two
+  //    separate variables, and it builds the connection itself:
+  //      NEXT_PUBLIC_SUPABASE_URL = https://<ref>.supabase.co   (you already have this)
+  //      SUPABASE_DB_PASSWORD     = your database password       (add this one)
+  //    The pooler host/port/user are derived automatically.
+  //
+  // B) Advanced: provide a full connection string in DATABASE_URL, which
+  //    overrides A). Used for local development.
   databaseUrl: process.env.DATABASE_URL || '',
+  supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '',
+  supabaseDbPassword: process.env.SUPABASE_DB_PASSWORD || process.env.SUPABASE_PASSWORD || '',
+  // Region of the Supabase project (used to build the pooler hostname).
+  supabaseRegion: process.env.SUPABASE_REGION || 'ap-northeast-2',
+  // Optional explicit overrides for the connection pooler.
+  supabasePoolerHost: process.env.SUPABASE_POOLER_HOST || '',
+  supabasePoolerPort: parseInt(process.env.SUPABASE_POOLER_PORT, 10) || 6543,
 
   // All tables live in this schema so the app never collides with other
   // applications sharing the same database.

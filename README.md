@@ -24,20 +24,27 @@ schema so they never collide with anything else in the database.
 The app is wired to deploy automatically: pushing to the repository triggers a
 Vercel build. It needs **one** environment variable to connect to the database.
 
-### 1. Add the database connection string in Vercel
+### 1. Add the database credentials in Vercel
 
-In the Vercel project **Settings → Environment Variables**, add:
+In the Vercel project **Settings → Environment Variables**, the simplest setup
+is two separate values — the Supabase URL and the database password:
 
 | Name | Value |
 | --- | --- |
-| `DATABASE_URL` | Your Supabase **Transaction pooler** connection string |
+| `NEXT_PUBLIC_SUPABASE_URL` | `https://<your-ref>.supabase.co` |
+| `SUPABASE_DB_PASSWORD` | your Supabase **database password** (Settings → Database) |
 
-Get it from Supabase: **Project → Connect → Transaction pooler** (port `6543`),
-which looks like:
+The app builds the connection itself from these — it derives the project ref
+from the URL, tries both `aws-0` / `aws-1` pooler hosts automatically, and
+URL-encodes the password, so special characters are safe.
 
-```
-postgresql://postgres.<project-ref>:<YOUR-DB-PASSWORD>@aws-0-<region>.pooler.supabase.com:6543/postgres
-```
+> Use the **database password** (Supabase → Settings → Database), *not* the
+> service-role API key. If the project isn't in region `ap-northeast-2`, also
+> set `SUPABASE_REGION` to the correct region.
+
+**Alternative (advanced):** instead of the two variables above, provide a full
+connection string in `DATABASE_URL` (Supabase → Connect → Transaction pooler).
+If set, `SUPABASE_DB_PASSWORD` takes precedence over `DATABASE_URL`.
 
 Optional variables (sensible defaults are used if omitted):
 
@@ -45,6 +52,7 @@ Optional variables (sensible defaults are used if omitted):
 | --- | --- | --- |
 | `SEED_ADMIN_EMAIL` | `admin@paramount.local` | First admin account's email |
 | `SEED_ADMIN_PASSWORD` | `admin123` | First admin account's password |
+| `SUPABASE_REGION` | `ap-northeast-2` | Supabase project region (pooler host) |
 | `DB_SCHEMA` | `pms` | Postgres schema the app uses |
 | `SESSION_TTL_MS` | `604800000` | Login session lifetime (7 days) |
 
