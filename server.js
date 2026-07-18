@@ -33,6 +33,14 @@ app.get('/api/health', (req, res) =>
         : config.databaseUrl
         ? 'database-url'
         : 'none',
+    env: {
+      NEXT_PUBLIC_SUPABASE_URL: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+      SUPABASE_URL: !!process.env.SUPABASE_URL,
+      SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+      SUPABASE_SERVICE_KEY: !!process.env.SUPABASE_SERVICE_KEY,
+      DATABASE_URL: !!process.env.DATABASE_URL,
+      SUPABASE_DB_PASSWORD: !!process.env.SUPABASE_DB_PASSWORD,
+    },
     time: new Date().toISOString(),
   })
 );
