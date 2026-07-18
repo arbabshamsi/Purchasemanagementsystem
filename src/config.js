@@ -19,6 +19,9 @@ const config = {
   //    overrides A). Used for local development.
   databaseUrl: process.env.DATABASE_URL || '',
   supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '',
+  // Preferred in production: Supabase URL + service-role key (no DB password
+  // needed). The app talks to the database through SECURITY DEFINER RPCs.
+  supabaseServiceKey: process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || '',
   supabaseDbPassword: process.env.SUPABASE_DB_PASSWORD || process.env.SUPABASE_PASSWORD || '',
   // Region of the Supabase project (used to build the pooler hostname).
   supabaseRegion: process.env.SUPABASE_REGION || 'ap-northeast-2',

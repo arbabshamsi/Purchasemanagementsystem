@@ -20,8 +20,19 @@ app.use(cookieParser());
 app.get('/api/health', (req, res) =>
   res.json({
     ok: true,
-    hasDb: !!(config.databaseUrl || config.supabaseDbPassword),
-    dbMode: config.supabaseDbPassword ? 'supabase-pieces' : config.databaseUrl ? 'database-url' : 'none',
+    hasDb: !!(
+      (config.supabaseUrl && config.supabaseServiceKey) ||
+      config.databaseUrl ||
+      config.supabaseDbPassword
+    ),
+    dbMode:
+      config.supabaseUrl && config.supabaseServiceKey
+        ? 'supabase-service-key'
+        : config.supabaseDbPassword
+        ? 'supabase-pieces'
+        : config.databaseUrl
+        ? 'database-url'
+        : 'none',
     time: new Date().toISOString(),
   })
 );

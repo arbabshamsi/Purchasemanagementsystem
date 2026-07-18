@@ -85,35 +85,83 @@ function getPool() {
   return poolPromise;
 }
 
+// ---- Transport selection ----
+// Production: Supabase URL + service-role key -> talk to the database through
+// the SECURITY DEFINER RPCs (no DB password / connection string needed).
+// Local dev: a Postgres connection string (DATABASE_URL) or SUPABASE_DB_PASSWORD.
+const useClient = !!(config.supabaseUrl && config.supabaseServiceKey);
+
+let supabaseClient = null;
+function getClient() {
+  if (!supabaseClient) {
+    const { createClient } = require('@supabase/supabase-js');
+    supabaseClient = createClient(config.supabaseUrl, config.supabaseServiceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+  }
+  return supabaseClient;
+}
+
+async function rpcRows(text, params) {
+  const { data, error } = await getClient().rpc('pms_exec_rows', {
+    query: text,
+    params: params || [],
+  });
+  if (error) throw new Error(error.message || 'Database error');
+  return data || [];
+}
+async function rpcRun(text, params) {
+  const { data, error } = await getClient().rpc('pms_exec_run', {
+    query: text,
+    params: params || [],
+  });
+  if (error) throw new Error(error.message || 'Database error');
+  return { rowCount: typeof data === 'number' ? data : 0 };
+}
+
 /** Run a query and return the rows. */
 async function query(text, params) {
+  if (useClient) return rpcRows(text, params);
   const p = await getPool();
   const res = await p.query(text, params);
   return res.rows;
 }
 /** Run a query and return the first row (or null). */
 async function one(text, params) {
+  if (useClient) {
+    const rows = await rpcRows(text, params);
+    return rows[0] || null;
+  }
   const p = await getPool();
   const res = await p.query(text, params);
   return res.rows[0] || null;
 }
 /** Run a query and return the raw result (rowCount, etc.). */
 async function run(text, params) {
+  if (useClient) return rpcRun(text, params);
   const p = await getPool();
   return p.query(text, params);
 }
 
 /**
- * Run `fn` inside a transaction. `fn` receives a client-bound helper with the
- * same query/one/run interface so every statement uses the same connection.
+ * Run `fn` inside a transaction. `fn` receives a helper with the same
+ * query/one/run interface.
+ *
+ * With Postgres (local): a real BEGIN/COMMIT transaction on one connection.
+ * With the Supabase client: PostgREST is stateless, so statements run
+ * sequentially (not wrapped in one transaction). The application logic is the
+ * same; only cross-statement atomicity differs.
  */
 async function tx(fn) {
+  if (useClient) {
+    return fn({ query, one, run });
+  }
   const p = await getPool();
   const client = await p.connect();
   const helper = {
-    query: async (t, p) => (await client.query(t, p)).rows,
-    one: async (t, p) => (await client.query(t, p)).rows[0] || null,
-    run: (t, p) => client.query(t, p),
+    query: async (t, pr) => (await client.query(t, pr)).rows,
+    one: async (t, pr) => (await client.query(t, pr)).rows[0] || null,
+    run: (t, pr) => client.query(t, pr),
   };
   try {
     await client.query('BEGIN');
@@ -268,7 +316,10 @@ let readyPromise = null;
 function ensureReady() {
   if (!readyPromise) {
     readyPromise = (async () => {
-      await run(SCHEMA_SQL);
+      // In client mode the schema is provisioned via a Supabase migration, so
+      // we skip DDL here. With a direct Postgres connection (local dev), create
+      // the schema idempotently.
+      if (!useClient) await run(SCHEMA_SQL);
       await seed();
     })().catch((err) => {
       readyPromise = null; // allow a later request to retry
@@ -278,4 +329,15 @@ function ensureReady() {
   return readyPromise;
 }
 
-module.exports = { getPool, query, one, run, tx, ensureReady, S, connectionCandidates, extractRef };
+module.exports = {
+  getPool,
+  query,
+  one,
+  run,
+  tx,
+  ensureReady,
+  S,
+  useClient,
+  connectionCandidates,
+  extractRef,
+};
