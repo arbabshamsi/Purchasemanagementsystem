@@ -95,6 +95,7 @@ async function doLogout() {
 const NAV = [
   { hash: '#/dashboard', label: 'Dashboard', icon: '📊' },
   { hash: '#/requisitions', label: 'Requisitions', icon: '📝' },
+  { hash: '#/items', label: 'Item Master', icon: '📦' },
   { hash: '#/price-list', label: 'Price List', icon: '💰' },
   { hash: '#/vendors', label: 'Vendors', icon: '🏭' },
   { hash: '#/users', label: 'Users', icon: '👥', role: 'admin' },
@@ -122,6 +123,7 @@ route(/^#\/requisitions\/new$/, () => viewReqForm(null));
 route(/^#\/requisitions\/(\d+)\/edit$/, (m) => viewReqForm(m[1]));
 route(/^#\/requisitions\/(\d+)\/source$/, (m) => viewSourcing(m[1]));
 route(/^#\/requisitions\/(\d+)$/, (m) => viewReqDetail(m[1]));
+route(/^#\/items$/, viewItems);
 route(/^#\/price-list$/, viewPriceList);
 route(/^#\/vendors$/, viewVendors);
 route(/^#\/users$/, viewUsers);
@@ -261,6 +263,7 @@ async function viewReqForm(id) {
         </table>
       </div>
     </div>
+    <datalist id="item-list"></datalist>
     <div class="card"><label>Notes<textarea id="f-notes" rows="2" placeholder="Anything else…">${r ? esc(r.notes || '') : ''}</textarea></label></div>
     <div class="form-actions">
       <a class="btn btn-outline" href="#/requisitions">Cancel</a>
@@ -268,10 +271,18 @@ async function viewReqForm(id) {
       <button class="btn btn-primary" id="save-submit">Submit</button>
     </div>`);
 
+  // Item-master autocomplete: suggest names and auto-fill the unit.
+  const master = {};
+  api('/items').then(({ items }) => {
+    const dl = $('#item-list');
+    if (dl) dl.innerHTML = items.map((i) => `<option value="${esc(i.name)}">`).join('');
+    items.forEach((i) => { master[i.name.toLowerCase()] = i.unit; });
+  }).catch(() => {});
+
   const lines = $('#lines');
   function addLine(it = {}) {
     const tr = h(`<tr>
-      <td><input class="li-desc" value="${esc(it.product_description || '')}" placeholder="Item / description" /></td>
+      <td><input class="li-desc" value="${esc(it.product_description || '')}" placeholder="Item / description" list="item-list" /></td>
       <td class="col-qty"><input type="number" class="li-qty" value="${it.quantity != null ? it.quantity : 1}" min="0" step="any" /></td>
       <td class="col-qty"><input class="li-unit" value="${esc(it.unit || '')}" placeholder="Pc/Kg" /></td>
       <td class="col-qty"><input class="li-size" value="${esc(it.size || '')}" placeholder="Size" /></td>
@@ -280,6 +291,12 @@ async function viewReqForm(id) {
       <td><button class="btn btn-ghost btn-sm li-del" style="color:var(--danger)">✕</button></td>
     </tr>`);
     tr.querySelector('.li-del').onclick = () => tr.remove();
+    const desc = tr.querySelector('.li-desc');
+    desc.oninput = () => {
+      const u = master[desc.value.trim().toLowerCase()];
+      const unitEl = tr.querySelector('.li-unit');
+      if (u && !unitEl.value) unitEl.value = u;
+    };
     lines.appendChild(tr);
   }
   $('#add-line').onclick = () => addLine();
@@ -500,6 +517,81 @@ async function viewSourcing(id) {
     } catch (err) { toast('Could not send', err.message, 'error'); }
   };
   draw();
+}
+
+/* ---------- Item Master ---------- */
+async function viewItems() {
+  const editable = can('purchaser', 'store');
+  setPage('Item Master', editable ? `<button class="btn btn-outline" id="items-upload">⬆ Upload CSV</button> <button class="btn btn-primary" id="items-add">+ Add item</button>` : '');
+  loading();
+  const [{ items }, { categories }] = await Promise.all([api('/items'), api('/items/categories')]);
+  renderRaw(`
+    <p class="card-sub" style="margin:-8px 0 14px">The master list of everything you buy. Requisitions and the price list pick from here.</p>
+    <div class="filters">
+      <input id="im-search" placeholder="Search item…" />
+      <select id="im-cat"><option value="">All categories</option>${categories.map((c) => `<option value="${esc(c.category)}">${esc(c.category)} (${c.n})</option>`).join('')}</select>
+    </div>
+    <div id="im-table"></div>`);
+  const draw = (list) => {
+    const rows = list.length ? list.map((it) => `
+      <tr>
+        <td>${it.code ? `<code>${esc(it.code)}</code>` : '—'}</td>
+        <td><strong>${esc(it.name)}</strong></td>
+        <td>${it.category ? `<span class="badge company">${esc(it.category)}</span>` : '—'}</td>
+        <td>${esc(it.unit)}</td>
+        ${editable ? `<td class="text-right"><button class="btn btn-outline btn-sm" data-edit="${it.id}">Edit</button> <button class="btn btn-ghost btn-sm" data-del="${it.id}" style="color:var(--danger)">✕</button></td>` : ''}
+      </tr>`).join('')
+      : `<tr><td colspan="${editable ? 5 : 4}" class="empty"><div class="empty-icon">📦</div>No items yet. Add one or upload a CSV.</td></tr>`;
+    $('#im-table').innerHTML = `<div class="table-wrap"><table>
+      <thead><tr><th>Code</th><th>Item</th><th>Category</th><th>Unit</th>${editable ? '<th></th>' : ''}</tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+    if (editable) {
+      document.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => itemModal(list.find((x) => x.id == b.dataset.edit))));
+      document.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => { if (confirm('Delete this item?')) { await api(`/items/${b.dataset.del}`, { method: 'DELETE' }); viewItems(); } }));
+    }
+  };
+  draw(items);
+  const apply = async () => {
+    const p = new URLSearchParams();
+    if ($('#im-search').value.trim()) p.set('search', $('#im-search').value.trim());
+    if ($('#im-cat').value) p.set('category', $('#im-cat').value);
+    draw((await api(`/items?${p}`)).items);
+  };
+  $('#im-search').oninput = apply; $('#im-cat').onchange = apply;
+  if (editable) { $('#items-add').onclick = () => itemModal(null); $('#items-upload').onclick = () => itemUploadModal(); }
+}
+function itemModal(it) {
+  const edit = !!it;
+  openModal(`<h3>${edit ? 'Edit' : 'Add'} item</h3>
+    <div class="form-row">
+      <label>Code<input id="i-code" value="${edit ? esc(it.code || '') : ''}" placeholder="Optional"/></label>
+      <label>Category<input id="i-cat" value="${edit ? esc(it.category || '') : ''}" list="cat-list" placeholder="Electrical / Transport…"/></label>
+    </div>
+    <label>Item name *<input id="i-name" value="${edit ? esc(it.name) : ''}"/></label>
+    <div class="form-row">
+      <label>Unit<input id="i-unit" value="${edit ? esc(it.unit) : 'pcs'}"/></label>
+    </div>
+    <div class="form-actions"><button class="btn btn-outline" onclick="closeModalGlobal()">Cancel</button><button class="btn btn-primary" id="ok">Save</button></div>`);
+  $('#ok').onclick = async () => {
+    const name = $('#i-name').value.trim(); if (!name) return toast('Item name required', '', 'error');
+    const body = { code: $('#i-code').value.trim(), category: $('#i-cat').value.trim(), name, unit: $('#i-unit').value.trim() || 'pcs' };
+    try { await api(edit ? `/items/${it.id}` : '/items', { method: edit ? 'PUT' : 'POST', body }); closeModal(); viewItems(); toast('Saved'); }
+    catch (err) { toast('Could not save', err.message, 'error'); }
+  };
+}
+function itemUploadModal() {
+  openModal(`<h3>Upload Item Master (CSV)</h3>
+    <p class="card-sub">Columns: <code>code, category, item_name, unit, notes</code>. Existing items (same name) are updated. <a href="/api/items/template.csv">Download template</a>.</p>
+    <label>CSV file<input type="file" id="im-file" accept=".csv,text/csv"/></label>
+    <div class="form-actions"><button class="btn btn-outline" onclick="closeModalGlobal()">Cancel</button><button class="btn btn-primary" id="ok">Upload</button></div>`);
+  $('#ok').onclick = async () => {
+    const f = $('#im-file').files[0]; if (!f) return toast('Choose a CSV file', '', 'error');
+    const fd = new FormData(); fd.append('file', f); $('#ok').disabled = true;
+    try {
+      const { summary } = await api('/items/upload', { method: 'POST', body: fd });
+      toast('Uploaded', `${summary.created} added, ${summary.updated} updated.`); closeModal(); viewItems();
+    } catch (err) { toast('Upload failed', err.message, 'error'); $('#ok').disabled = false; }
+  };
 }
 
 /* ---------- Price List ---------- */

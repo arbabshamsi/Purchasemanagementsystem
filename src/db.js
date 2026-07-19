@@ -232,6 +232,19 @@ CREATE TABLE IF NOT EXISTS ${S}.price_list (
   created_at     timestamptz NOT NULL DEFAULT now()
 );
 
+-- Item master: the catalogue of items/commodities everyone picks from.
+CREATE TABLE IF NOT EXISTS ${S}.item_master (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  code       text,
+  name       text NOT NULL,
+  category   text,
+  unit       text NOT NULL DEFAULT 'pcs',
+  notes      text,
+  active     boolean NOT NULL DEFAULT true,
+  created_by bigint REFERENCES ${S}.users(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
 -- Requisitions (the digital slip). Flow:
 -- draft -> submitted (to purchaser) -> sourced (vendor proposed) ->
 -- approved (final) / rejected -> po_made -> cancelled.
@@ -308,6 +321,8 @@ CREATE INDEX IF NOT EXISTS idx_${S}_req_status ON ${S}.requisitions(status);
 CREATE INDEX IF NOT EXISTS idx_${S}_req_items_req ON ${S}.requisition_items(requisition_id);
 CREATE INDEX IF NOT EXISTS idx_${S}_req_quotes_req ON ${S}.requisition_quotes(requisition_id);
 CREATE INDEX IF NOT EXISTS idx_${S}_price_list_cat ON ${S}.price_list(category);
+CREATE INDEX IF NOT EXISTS idx_${S}_item_master_cat ON ${S}.item_master(category);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_${S}_item_master_name ON ${S}.item_master(lower(name));
 CREATE INDEX IF NOT EXISTS idx_${S}_sessions_user ON ${S}.sessions(user_id);
 `;
 

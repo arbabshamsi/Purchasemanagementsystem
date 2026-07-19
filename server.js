@@ -56,6 +56,7 @@ app.use('/api', attachUser);
 app.use('/api/auth', require('./src/routes/auth'));
 app.use('/api', require('./src/routes/meta'));
 app.use('/api/vendors', require('./src/routes/vendors'));
+app.use('/api/items', require('./src/routes/items'));
 app.use('/api/price-list', require('./src/routes/priceList'));
 app.use('/api/requisitions', require('./src/routes/requisitions'));
 app.use('/api/users', require('./src/routes/users'));
