@@ -25,7 +25,7 @@ async function destroySession(token) {
 async function userFromToken(token) {
   if (!token) return null;
   const row = await one(
-    `SELECT u.id, u.name, u.email, u.role, u.active
+    `SELECT u.id, u.name, u.email, u.role, u.department, u.active
        FROM ${S}.sessions s
        JOIN ${S}.users u ON u.id = s.user_id
       WHERE s.token = $1 AND s.expires_at >= now()`,

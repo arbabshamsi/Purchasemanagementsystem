@@ -1,99 +1,61 @@
 'use strict';
 
 /**
- * Optional demo-data seeder. Adds sample suppliers, items, rate lists and
- * purchase orders so the app has something to show. Safe to re-run: it only
- * inserts when there are no suppliers yet.
+ * Optional demo-data seeder for the requisition system. Adds a few vendors,
+ * price-list entries and one requisition. Safe to re-run: only inserts when
+ * there are no requisitions yet.
  *
  *   npm run seed
  */
 
-const { query, one, run, tx, ensureReady, S } = require('../src/db');
+const { one, tx, ensureReady, S } = require('../src/db');
 
 (async () => {
   await ensureReady();
 
-  const supplierCount = await one(`SELECT COUNT(*)::int AS n FROM ${S}.suppliers`);
-  if (supplierCount.n > 0) {
-    console.log('[seed] Suppliers already exist — skipping demo data.');
+  const existing = await one(`SELECT COUNT(*)::int AS n FROM ${S}.requisitions`);
+  if (existing.n > 0) {
+    console.log('[seed] Requisitions already exist — skipping demo data.');
     process.exit(0);
   }
-
-  const admin = await one(`SELECT id FROM ${S}.users WHERE role = 'admin' ORDER BY id LIMIT 1`);
+  const admin = await one(`SELECT id FROM ${S}.users WHERE role='admin' ORDER BY id LIMIT 1`);
   const adminId = admin ? admin.id : null;
-  const paramount = await one(`SELECT id FROM ${S}.companies WHERE code = 'PARAMOUNT'`);
-  const aia = await one(`SELECT id FROM ${S}.companies WHERE code = 'AIA'`);
 
   await tx(async (c) => {
-    const supA = await c.one(
-      `INSERT INTO ${S}.suppliers (name, contact_person, email, phone) VALUES ($1,$2,$3,$4) RETURNING id`,
-      ['Al-Karam Textiles', 'Bilal Ahmed', 'sales@alkaram.example', '+92 300 1234567']
-    );
-    const supB = await c.one(
-      `INSERT INTO ${S}.suppliers (name, contact_person, email, phone) VALUES ($1,$2,$3,$4) RETURNING id`,
-      ['Gulberg Ceramics', 'Sana Riaz', 'orders@gulbergceramics.example', '+92 321 7654321']
-    );
+    const maya = await c.one(`INSERT INTO ${S}.vendors (name, phone) VALUES ('Maya Elec.', '+91 90000 00001') RETURNING id`);
+    const ambika = await c.one(`INSERT INTO ${S}.vendors (name, phone) VALUES ('Ambika Traders', '+91 90000 00002') RETURNING id`);
 
-    const itemDefs = [
-      ['Cotton Bath Towel', 'TWL-BATH', 'pcs', 'Linen'],
-      ['Cotton Hand Towel', 'TWL-HAND', 'pcs', 'Linen'],
-      ['Ceramic Dinner Plate 10in', 'PLT-10', 'pcs', 'Tableware'],
-      ['Ceramic Soup Bowl', 'BWL-SOUP', 'pcs', 'Tableware'],
-      ['Stainless Steel Spoon', 'SPN-01', 'dozen', 'Cutlery'],
+    const prices = [
+      ['Transportation', 'Truck 20ft (local)', 'trip', 3500],
+      ['Courier', 'Domestic courier up to 5kg', 'shipment', 250],
+      ['Consumables', 'A4 Paper Ream', 'ream', 320],
+      ['Freight Forwarding', 'Sea freight per CBM', 'cbm', 1800],
+      ['Electrical', 'MCB Box 4 way', 'pc', 220],
+      ['Electrical', 'Wire 2.5mm poly cab', 'coil', 4625],
     ];
-    const items = [];
-    for (const [name, sku, unit, category] of itemDefs) {
-      const it = await c.one(
-        `INSERT INTO ${S}.items (name, sku, unit, category) VALUES ($1,$2,$3,$4) RETURNING id`,
-        [name, sku, unit, category]
+    for (const [cat, name, unit, price] of prices) {
+      await c.run(
+        `INSERT INTO ${S}.price_list (category, item_name, unit, price, created_by) VALUES ($1,$2,$3,$4,$5)`,
+        [cat, name, unit, price, adminId]
       );
-      items.push(it.id);
     }
-
-    const rlA = await c.one(
-      `INSERT INTO ${S}.rate_lists (title, supplier_id, currency, effective_date, status, created_by)
-       VALUES ($1,$2,'PKR',current_date,'active',$3) RETURNING id`,
-      ['Al-Karam Textiles — 2026 prices', supA.id, adminId]
-    );
-    await c.run(`INSERT INTO ${S}.rate_list_items (rate_list_id, item_id, rate, unit) VALUES ($1,$2,850,'pcs'),($1,$3,420,'pcs')`, [rlA.id, items[0], items[1]]);
-
-    const rlB = await c.one(
-      `INSERT INTO ${S}.rate_lists (title, supplier_id, currency, effective_date, status, created_by)
-       VALUES ($1,$2,'PKR',current_date,'active',$3) RETURNING id`,
-      ['Gulberg Ceramics — tableware', supB.id, adminId]
-    );
-    await c.run(`INSERT INTO ${S}.rate_list_items (rate_list_id, item_id, rate, unit) VALUES ($1,$2,320,'pcs'),($1,$3,260,'pcs'),($1,$4,540,'dozen')`, [rlB.id, items[2], items[3], items[4]]);
 
     const year = new Date().getFullYear();
-    async function createPo(number, companyId, supplierId, status, lines) {
-      const subtotal = lines.reduce((s, l) => s + l.qty * l.rate, 0);
-      const po = await c.one(
-        `INSERT INTO ${S}.purchase_orders (po_number, company_id, supplier_id, status, currency, subtotal, tax_percent, tax_amount, total, created_by)
-         VALUES ($1,$2,$3,$4,'PKR',$5,0,0,$5,$6) RETURNING id`,
-        [number, companyId, supplierId, status, subtotal, adminId]
-      );
-      for (const l of lines) {
-        await c.run(
-          `INSERT INTO ${S}.po_items (po_id, item_id, description, quantity, rate, amount) VALUES ($1,$2,$3,$4,$5,$6)`,
-          [po.id, l.itemId, l.desc, l.qty, l.rate, l.qty * l.rate]
-        );
-      }
-      await c.run(`INSERT INTO ${S}.po_history (po_id, action, note, user_id) VALUES ($1,'created','Demo PO',$2)`, [po.id, adminId]);
-      if (status === 'pending') {
-        await c.run(`INSERT INTO ${S}.po_history (po_id, action, note, user_id) VALUES ($1,'submitted','Submitted for approval',$2)`, [po.id, adminId]);
-      }
-    }
-
-    await createPo(`PARAMOUNT-${year}-0001`, paramount.id, supA.id, 'pending', [
-      { itemId: items[0], desc: 'Cotton Bath Towel', qty: 100, rate: 850 },
-      { itemId: items[1], desc: 'Cotton Hand Towel', qty: 200, rate: 420 },
-    ]);
-    await createPo(`AIA-${year}-0001`, aia.id, supB.id, 'draft', [
-      { itemId: items[2], desc: 'Ceramic Dinner Plate 10in', qty: 150, rate: 320 },
-    ]);
+    const req = await c.one(
+      `INSERT INTO ${S}.requisitions
+         (req_number, requested_by, requested_by_name, department, request_importance, status, created_by)
+       VALUES ($1,$2,'System Admin','Electric','high','submitted',$2) RETURNING id`,
+      [`PHC-REQ-${year}-0001`, adminId]
+    );
+    await c.run(
+      `INSERT INTO ${S}.requisition_items (requisition_id, product_description, quantity, unit, purpose, sort_order)
+       VALUES ($1,'MCB Box 4way',10,'pc','wood stock hall',0), ($1,'Wire 2.5mm',500,'mtr','factory use',1)`,
+      [req.id]
+    );
+    await c.run(`INSERT INTO ${S}.requisition_history (requisition_id, action, note, user_id) VALUES ($1,'created','Demo requisition',$2),($1,'submitted','Submitted for sourcing',$2)`, [req.id, adminId]);
   });
 
-  console.log('[seed] Demo data created: 2 suppliers, 5 items, 2 rate lists, 2 purchase orders.');
+  console.log('[seed] Demo data created: 2 vendors, 6 prices, 1 requisition.');
   process.exit(0);
 })().catch((err) => {
   console.error('[seed] Failed:', err.message);

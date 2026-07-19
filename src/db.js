@@ -185,7 +185,9 @@ CREATE TABLE IF NOT EXISTS ${S}.users (
   name          text NOT NULL,
   email         text NOT NULL UNIQUE,
   password_hash text NOT NULL,
-  role          text NOT NULL DEFAULT 'staff' CHECK (role IN ('admin','approver','staff')),
+  role          text NOT NULL DEFAULT 'staff'
+                     CHECK (role IN ('admin','approver','purchaser','store','staff')),
+  department    text,
   active        boolean NOT NULL DEFAULT true,
   created_at    timestamptz NOT NULL DEFAULT now()
 );
@@ -204,98 +206,117 @@ CREATE TABLE IF NOT EXISTS ${S}.companies (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS ${S}.suppliers (
+-- Vendors (suppliers we buy from).
+CREATE TABLE IF NOT EXISTS ${S}.vendors (
   id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name           text NOT NULL,
-  contact_person text, email text, phone text, address text,
+  contact_person text, phone text, email text, address text, gst_number text,
   active         boolean NOT NULL DEFAULT true,
   created_at     timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS ${S}.items (
-  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  name       text NOT NULL,
-  sku        text,
-  unit       text NOT NULL DEFAULT 'pcs',
-  category   text,
-  active     boolean NOT NULL DEFAULT true,
-  created_at timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS ${S}.rate_lists (
+-- Master price list: prices for every commodity/service (transport, courier,
+-- consumables, non-consumables, freight, etc.). Optionally tied to a vendor.
+CREATE TABLE IF NOT EXISTS ${S}.price_list (
   id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  title          text NOT NULL,
-  supplier_id    bigint NOT NULL REFERENCES ${S}.suppliers(id) ON DELETE CASCADE,
-  company_id     bigint REFERENCES ${S}.companies(id) ON DELETE SET NULL,
-  currency       text NOT NULL DEFAULT 'PKR',
-  effective_date date,
-  status         text NOT NULL DEFAULT 'active' CHECK (status IN ('draft','active','archived')),
+  category       text,
+  item_name      text NOT NULL,
+  unit           text NOT NULL DEFAULT 'pcs',
+  price          numeric(14,2) NOT NULL DEFAULT 0,
+  currency       text NOT NULL DEFAULT 'INR',
+  vendor_id      bigint REFERENCES ${S}.vendors(id) ON DELETE SET NULL,
   notes          text,
+  effective_date date,
+  active         boolean NOT NULL DEFAULT true,
   created_by     bigint REFERENCES ${S}.users(id) ON DELETE SET NULL,
   created_at     timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS ${S}.rate_list_items (
-  id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  rate_list_id bigint NOT NULL REFERENCES ${S}.rate_lists(id) ON DELETE CASCADE,
-  item_id      bigint NOT NULL REFERENCES ${S}.items(id) ON DELETE CASCADE,
-  rate         numeric(14,2) NOT NULL DEFAULT 0,
-  unit         text,
-  UNIQUE (rate_list_id, item_id)
+-- Requisitions (the digital slip). Flow:
+-- draft -> submitted (to purchaser) -> sourced (vendor proposed) ->
+-- approved (final) / rejected -> po_made -> cancelled.
+CREATE TABLE IF NOT EXISTS ${S}.requisitions (
+  id                 bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  req_number         text NOT NULL UNIQUE,
+  company_id         bigint REFERENCES ${S}.companies(id),
+  requested_by       bigint REFERENCES ${S}.users(id) ON DELETE SET NULL,
+  requested_by_name  text,
+  department         text,
+  party_name         text,
+  request_importance text NOT NULL DEFAULT 'normal'
+                          CHECK (request_importance IN ('low','normal','high','urgent')),
+  payment_mode       text,
+  required_time      text,
+  expected_inhouse_date date,
+  status             text NOT NULL DEFAULT 'draft'
+                          CHECK (status IN ('draft','submitted','sourced','approved','rejected','po_made','cancelled')),
+  proposed_vendor_id bigint REFERENCES ${S}.vendors(id) ON DELETE SET NULL,
+  purchaser_id       bigint REFERENCES ${S}.users(id) ON DELETE SET NULL,
+  purchaser_note     text,
+  approved_by        bigint REFERENCES ${S}.users(id) ON DELETE SET NULL,
+  approved_at        timestamptz,
+  decision_note      text,
+  po_reference       text,
+  notes              text,
+  created_by         bigint REFERENCES ${S}.users(id) ON DELETE SET NULL,
+  created_at         timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS ${S}.purchase_orders (
-  id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  po_number     text NOT NULL UNIQUE,
-  company_id    bigint NOT NULL REFERENCES ${S}.companies(id),
-  supplier_id   bigint NOT NULL REFERENCES ${S}.suppliers(id),
-  rate_list_id  bigint REFERENCES ${S}.rate_lists(id) ON DELETE SET NULL,
-  status        text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','pending','approved','rejected','cancelled')),
-  currency      text NOT NULL DEFAULT 'PKR',
-  subtotal      numeric(14,2) NOT NULL DEFAULT 0,
-  tax_percent   numeric(6,2) NOT NULL DEFAULT 0,
-  tax_amount    numeric(14,2) NOT NULL DEFAULT 0,
-  total         numeric(14,2) NOT NULL DEFAULT 0,
-  expected_date date,
-  notes         text,
-  created_by    bigint REFERENCES ${S}.users(id) ON DELETE SET NULL,
-  approved_by   bigint REFERENCES ${S}.users(id) ON DELETE SET NULL,
-  approved_at   timestamptz,
-  decision_note text,
-  created_at    timestamptz NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS ${S}.requisition_items (
+  id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  requisition_id      bigint NOT NULL REFERENCES ${S}.requisitions(id) ON DELETE CASCADE,
+  product_description text NOT NULL,
+  quantity            numeric(14,3) NOT NULL DEFAULT 1,
+  unit                text,
+  size                text,
+  purpose             text,
+  fixed_rate          numeric(14,2),
+  sort_order          int NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS ${S}.po_items (
-  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  po_id       bigint NOT NULL REFERENCES ${S}.purchase_orders(id) ON DELETE CASCADE,
-  item_id     bigint REFERENCES ${S}.items(id) ON DELETE SET NULL,
-  description text NOT NULL,
-  quantity    numeric(14,3) NOT NULL DEFAULT 1,
-  rate        numeric(14,2) NOT NULL DEFAULT 0,
-  amount      numeric(14,2) NOT NULL DEFAULT 0
+-- Vendor quotes gathered by the purchaser for comparison; one is awarded.
+CREATE TABLE IF NOT EXISTS ${S}.requisition_quotes (
+  id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  requisition_id bigint NOT NULL REFERENCES ${S}.requisitions(id) ON DELETE CASCADE,
+  vendor_id      bigint NOT NULL REFERENCES ${S}.vendors(id) ON DELETE CASCADE,
+  is_awarded     boolean NOT NULL DEFAULT false,
+  total_amount   numeric(14,2) NOT NULL DEFAULT 0,
+  notes          text,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (requisition_id, vendor_id)
 );
 
-CREATE TABLE IF NOT EXISTS ${S}.po_history (
-  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  po_id      bigint NOT NULL REFERENCES ${S}.purchase_orders(id) ON DELETE CASCADE,
-  action     text NOT NULL,
-  note       text,
-  user_id    bigint REFERENCES ${S}.users(id) ON DELETE SET NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS ${S}.requisition_quote_items (
+  id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  quote_id            bigint NOT NULL REFERENCES ${S}.requisition_quotes(id) ON DELETE CASCADE,
+  requisition_item_id bigint NOT NULL REFERENCES ${S}.requisition_items(id) ON DELETE CASCADE,
+  rate                numeric(14,2) NOT NULL DEFAULT 0,
+  amount              numeric(14,2) NOT NULL DEFAULT 0,
+  UNIQUE (quote_id, requisition_item_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_${S}_rate_lists_supplier ON ${S}.rate_lists(supplier_id);
-CREATE INDEX IF NOT EXISTS idx_${S}_rate_list_items_list ON ${S}.rate_list_items(rate_list_id);
-CREATE INDEX IF NOT EXISTS idx_${S}_po_company ON ${S}.purchase_orders(company_id);
-CREATE INDEX IF NOT EXISTS idx_${S}_po_status ON ${S}.purchase_orders(status);
-CREATE INDEX IF NOT EXISTS idx_${S}_po_items_po ON ${S}.po_items(po_id);
+CREATE TABLE IF NOT EXISTS ${S}.requisition_history (
+  id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  requisition_id bigint NOT NULL REFERENCES ${S}.requisitions(id) ON DELETE CASCADE,
+  action         text NOT NULL,
+  note           text,
+  user_id        bigint REFERENCES ${S}.users(id) ON DELETE SET NULL,
+  created_at     timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_${S}_req_status ON ${S}.requisitions(status);
+CREATE INDEX IF NOT EXISTS idx_${S}_req_items_req ON ${S}.requisition_items(requisition_id);
+CREATE INDEX IF NOT EXISTS idx_${S}_req_quotes_req ON ${S}.requisition_quotes(requisition_id);
+CREATE INDEX IF NOT EXISTS idx_${S}_price_list_cat ON ${S}.price_list(category);
 CREATE INDEX IF NOT EXISTS idx_${S}_sessions_user ON ${S}.sessions(user_id);
 `;
 
 async function seed() {
   const companies = await one(`SELECT COUNT(*)::int AS n FROM ${S}.companies`);
   if (companies.n === 0) {
-    await run(`INSERT INTO ${S}.companies (name, code) VALUES ('Paramount','PARAMOUNT'), ('AiA','AIA')`);
+    await run(
+      `INSERT INTO ${S}.companies (name, code) VALUES ('Paramount Home Collections Pvt Ltd','PHC')`
+    );
   }
   const users = await one(`SELECT COUNT(*)::int AS n FROM ${S}.users`);
   if (users.n === 0) {

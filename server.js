@@ -55,10 +55,9 @@ app.use('/api', attachUser);
 // API routes
 app.use('/api/auth', require('./src/routes/auth'));
 app.use('/api', require('./src/routes/meta'));
-app.use('/api/suppliers', require('./src/routes/suppliers'));
-app.use('/api/items', require('./src/routes/items'));
-app.use('/api/rate-lists', require('./src/routes/rateLists'));
-app.use('/api/purchase-orders', require('./src/routes/purchaseOrders'));
+app.use('/api/vendors', require('./src/routes/vendors'));
+app.use('/api/price-list', require('./src/routes/priceList'));
+app.use('/api/requisitions', require('./src/routes/requisitions'));
 app.use('/api/users', require('./src/routes/users'));
 
 // Static frontend (used for local dev; on Vercel static files are served by the CDN).

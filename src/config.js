@@ -49,8 +49,20 @@ const config = {
     password: process.env.SEED_ADMIN_PASSWORD || 'admin123',
   },
 
-  // Max accepted rate-list upload size (5 MB).
+  // Max accepted upload size (5 MB).
   maxUploadBytes: 5 * 1024 * 1024,
+
+  // Default currency for prices / amounts.
+  currency: process.env.CURRENCY || 'INR',
+
+  // Email notifications (optional). If RESEND_API_KEY is set, notifications are
+  // sent via Resend; otherwise they are logged and skipped (the in-app queues
+  // still work). The owner is CC'd on every notification.
+  resendApiKey: process.env.RESEND_API_KEY || '',
+  mailFrom: process.env.MAIL_FROM || 'Purchase System <onboarding@resend.dev>',
+  ownerEmail:
+    process.env.NOTIFY_OWNER_EMAIL || process.env.OWNER_EMAIL || 'arbab@paramounthomecollections.com',
+  appUrl: process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'https://purchasemanagementsystem.vercel.app',
 };
 
 module.exports = config;

@@ -1,143 +1,96 @@
-# Purchase Management System
+# Purchase Management System — Paramount Home Collections
 
-A web app for **Paramount** and **AiA** to manage supplier **rate lists** and
-route every purchase through a **Purchase Order (PO) approval workflow**.
+A web app that replaces the paper **Purchase Requisition** slip and runs the
+whole approval flow up to the point a PO is raised in Tally.
 
-It does the three things asked for:
+## The workflow
 
-1. **Fill in a rate list of all items** you send to a supplier — enter them one
-   by one, or **upload the whole list** from a spreadsheet (CSV).
-2. **A link to upload all rate lists** — *Rate Lists → Upload* accepts a CSV and
-   creates the items and prices automatically.
-3. **Every new purchase is approved by a PO** — POs are raised for **Paramount**
-   or **AiA**, submitted for approval, and an approver marks them **Approved** or
-   **Rejected**. Nothing is purchased until a PO is approved.
+```
+Requester              Purchaser                 Owner (final)        Store / Accounts
+    │                     │                          │                      │
+ raise ──submit──▶  source & compare  ──propose──▶  approve / reject ──▶  make PO in Tally
+requisition         vendors (rates)                (go-ahead)            (mark "PO made")
+```
 
-**Stack:** Node.js + Express (serverless on Vercel), PostgreSQL (Supabase),
-dependency-free HTML/CSS/JS frontend. All tables live in an isolated `pms`
-schema so they never collide with anything else in the database.
+1. **Requisition** — any employee fills the digital slip: products, qty, unit,
+   size, purpose, department, importance, payment mode, required time, expected
+   in-house date. Auto-numbered `PHC-REQ-2026-0001`.
+2. **Sourcing** — the **purchaser** enters several vendors' rates side-by-side
+   (like a Maya Elec. vs Ambika comparison), totals compute live, and proposes
+   one vendor.
+3. **Final approval** — the proposal goes to the **owner**, who approves (the
+   go-ahead) or rejects.
+4. **PO made** — **store/accounts** create the PO in **Tally** (outside this
+   system) and mark the requisition "PO made". No Tally integration.
 
----
+Plus a **Price List** — a master catalogue of prices for everything
+(transportation, courier, consumables, non-consumables, freight forwarding,
+electrical, …), searchable by category, with CSV upload.
+
+Email notifications are sent at each step (owner CC'd); see *Optional email*.
+
+## Roles
+
+| Role | Can |
+| --- | --- |
+| **staff** | raise requisitions |
+| **purchaser** | source & propose vendors, manage vendors & price list |
+| **approver** | give the final approval / rejection |
+| **store** | mark PO made, manage vendors & price list |
+| **admin** | everything, plus manage users |
+
+## Tech
+
+Node.js + Express (serverless on Vercel) · PostgreSQL (Supabase) · dependency-free
+HTML/CSS/JS frontend. All tables live in an isolated `pms` schema.
 
 ## Deploying on Vercel + Supabase
 
-The app is wired to deploy automatically: pushing to the repository triggers a
-Vercel build. It needs **one** environment variable to connect to the database.
+The Vercel project auto-deploys from this repo. It connects to the database with
+the standard Supabase variables (no DB password needed):
 
-### 1. Add the database credentials in Vercel
-
-In the Vercel project **Settings → Environment Variables**, the simplest setup
-is two separate values — the Supabase URL and the database password:
-
-| Name | Value |
+| Vercel env var | Value |
 | --- | --- |
-| `NEXT_PUBLIC_SUPABASE_URL` | `https://<your-ref>.supabase.co` |
-| `SUPABASE_DB_PASSWORD` | your Supabase **database password** (Settings → Database) |
+| `SUPABASE_SERVICE_ROLE_KEY` | your Supabase **service_role** key (Settings → API) |
+| `NEXT_PUBLIC_SUPABASE_URL` | `https://<ref>.supabase.co` *(falls back to the project URL if unset)* |
 
-The app builds the connection itself from these — it derives the project ref
-from the URL, tries both `aws-0` / `aws-1` pooler hosts automatically, and
-URL-encodes the password, so special characters are safe.
+The app talks to the private `pms` schema through two SECURITY DEFINER RPCs
+(`pms_exec_rows` / `pms_exec_run`) that only the service role can call.
 
-> Use the **database password** (Supabase → Settings → Database), *not* the
-> service-role API key. If the project isn't in region `ap-northeast-2`, also
-> set `SUPABASE_REGION` to the correct region.
-
-**Alternative (advanced):** instead of the two variables above, provide a full
-connection string in `DATABASE_URL` (Supabase → Connect → Transaction pooler).
-If set, `SUPABASE_DB_PASSWORD` takes precedence over `DATABASE_URL`.
-
-Optional variables (sensible defaults are used if omitted):
+Optional variables:
 
 | Name | Default | Purpose |
 | --- | --- | --- |
-| `SEED_ADMIN_EMAIL` | `admin@paramount.local` | First admin account's email |
-| `SEED_ADMIN_PASSWORD` | `admin123` | First admin account's password |
-| `SUPABASE_REGION` | `ap-northeast-2` | Supabase project region (pooler host) |
-| `DB_SCHEMA` | `pms` | Postgres schema the app uses |
-| `SESSION_TTL_MS` | `604800000` | Login session lifetime (7 days) |
+| `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` | `admin@paramount.local` / `admin123` | first admin |
+| `RESEND_API_KEY` | — | enable email notifications via Resend |
+| `NOTIFY_OWNER_EMAIL` | `arbab@paramounthomecollections.com` | CC'd on every notification |
+| `DATABASE_URL` | — | direct Postgres string (local dev / override) |
 
-### 2. Redeploy
+### Optional email
 
-Trigger a redeploy (or push a commit). On the first request the app creates its
-schema (if missing) and the initial admin account, then you can sign in.
-
-> The database schema is also kept as a Supabase migration (`pms_init_schema`),
-> so the tables exist independently of the app's first-run bootstrap.
-
----
+Notifications work without any setup for the **in-app queues** (Dashboard shows
+"To source / Awaiting your approval / Ready for PO"). To also send **emails**,
+add a `RESEND_API_KEY` (and verify a sending domain in Resend). Until then,
+emails are skipped and logged.
 
 ## Running locally
-
-Requires a PostgreSQL database. Point `DATABASE_URL` at it:
 
 ```bash
 npm install
 export DATABASE_URL="postgresql://user:pass@localhost:5432/pms"
-npm run seed     # optional: demo suppliers, items, rate lists & POs
-npm start        # → http://localhost:3000
+npm run seed     # optional demo data
+npm start        # http://localhost:3000
 ```
 
-Default admin (change it via env vars): **`admin@paramount.local`** / **`admin123`**.
-
----
-
-## How it works
-
-### Roles
-
-| Role | Can do |
-| --- | --- |
-| **Staff** | Create suppliers, items, rate lists and POs; submit POs for approval. |
-| **Approver** | Everything staff can, **plus** approve / reject pending POs. |
-| **Admin** | Everything, **plus** manage users. |
-
-An approver cannot approve a PO they created themselves (unless they are an
-admin) — enforcing separation of duties.
-
-### The rate list
-
-A **rate list** is the set of agreed prices for one supplier. Create it two ways:
-
-- **Manually** — *Rate Lists → New rate list*, then add each item + rate.
-- **Upload** — *Rate Lists → Upload rate list*, with a CSV whose columns are
-  flexible (`item_name`/`item`, `sku`, `unit`, `category`, `rate`/`price`):
-
-  ```csv
-  item_name,sku,unit,category,rate
-  Cotton Bath Towel,TWL-BATH,pcs,Linen,850
-  Ceramic Dinner Plate 10in,PLT-10,pcs,Tableware,320
-  ```
-
-  A sample is in [`sample-rate-list.csv`](./sample-rate-list.csv); a template can
-  be downloaded from the upload page. Using Excel? Save as CSV first.
-
-### The purchase-order workflow
-
-```
-draft ──submit──▶ pending ──approve──▶ approved
-                     │
-                     └────reject─────▶ rejected
-```
-
-Staff raise a PO (choosing Paramount or AiA and a supplier), pull line items
-from the supplier's rate list or type them in, then submit. An approver approves
-or rejects it. Every step is recorded in the PO's history. PO numbers are per
-company and year, e.g. `PARAMOUNT-2026-0001`.
-
----
+Default login: `admin@paramount.local` / `admin123` (change it after first login).
 
 ## Project layout
 
 ```
-server.js              Express app (exported for serverless + local listen)
-api/index.js           Vercel serverless entry
-vercel.json            Vercel routing (static assets + API function)
-src/
-  config.js            environment configuration
-  db.js                Postgres pool, schema bootstrap, seed
-  auth.js              sessions, password hashing, guards
-  routes/              REST API (auth, suppliers, items, rate lists, POs, users)
-public/                single-page frontend (HTML/CSS/JS)
-scripts/seed.js        optional demo data
-sample-rate-list.csv   example upload file
+server.js            Express app (serverless + local)
+api/index.js         Vercel entry
+src/db.js            Postgres/Supabase transport, schema, seed
+src/notify.js        email notifications (Resend, optional)
+src/routes/          auth · vendors · price-list · requisitions · users
+public/              single-page frontend
 ```
