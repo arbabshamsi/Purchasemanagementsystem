@@ -16,6 +16,8 @@ const HEADER_ALIASES = {
   description: 'item_name', product: 'item_name', commodity: 'item_name', service: 'item_name',
   unit: 'unit', uom: 'unit',
   price: 'price', rate: 'price', amount: 'price', cost: 'price',
+  gst: 'gst_percent', gst_percent: 'gst_percent', gst_: 'gst_percent', tax: 'gst_percent', 'gst%': 'gst_percent',
+  hsn: 'hsn_code', hsn_code: 'hsn_code', hsn_no: 'hsn_code',
   vendor: 'vendor', supplier: 'vendor', party: 'vendor',
   notes: 'notes', remark: 'notes', remarks: 'notes',
 };
@@ -66,11 +68,10 @@ router.get('/categories', requireAuth, async (req, res, next) => {
 // GET /api/price-list/template.csv
 router.get('/template.csv', requireAuth, (req, res) => {
   const csv =
-    'category,item_name,unit,price,vendor,notes\n' +
-    'Transportation,Truck 20ft local,trip,3500,,\n' +
-    'Courier,Domestic courier upto 5kg,shipment,250,,\n' +
-    'Consumables,A4 Paper Ream,ream,320,,\n' +
-    'Freight Forwarding,Sea freight per CBM,cbm,1800,,\n';
+    'category,item_name,unit,price,gst,hsn,vendor,notes\n' +
+    'Building Material,Iron Rod TMT Bar 8mm,kg,49.57,18,72142090,Chauhan Traders,\n' +
+    'Transportation,Truck 20ft local,trip,3500,0,,,\n' +
+    'Consumables,A4 Paper Ream,ream,320,12,4802,,\n';
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="price-list-template.csv"');
   res.send(csv);
@@ -126,14 +127,17 @@ router.post('/upload', requireRole('purchaser', 'store'), upload.single('file'),
           }
         }
         const price = parseFloat(String(row.price == null ? '' : row.price).replace(/[^0-9.\-]/g, ''));
+        const gst = parseFloat(String(row.gst_percent == null ? '' : row.gst_percent).replace(/[^0-9.\-]/g, ''));
         await c.run(
-          `INSERT INTO ${S}.price_list (category, item_name, unit, price, vendor_id, notes, created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          `INSERT INTO ${S}.price_list (category, item_name, unit, price, gst_percent, hsn_code, vendor_id, notes, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
           [
             (row.category || '').trim() || null,
             name,
             (row.unit || '').trim() || 'pcs',
             Number.isFinite(price) ? price : 0,
+            Number.isFinite(gst) ? gst : 0,
+            (row.hsn_code || '').trim() || null,
             vendorId,
             (row.notes || '').trim() || null,
             req.user.id,
@@ -153,16 +157,18 @@ router.put('/:id', requireRole('purchaser', 'store'), async (req, res, next) => 
   try {
     const existing = await one(`SELECT * FROM ${S}.price_list WHERE id = $1`, [req.params.id]);
     if (!existing) return res.status(404).json({ error: 'Price not found' });
-    const { category, item_name, unit, price, notes, active } = req.body || {};
+    const { category, item_name, unit, price, gst_percent, hsn_code, notes, active } = req.body || {};
     const row = await one(
       `UPDATE ${S}.price_list
-          SET category=$1, item_name=$2, unit=$3, price=$4, notes=$5, active=$6
-        WHERE id=$7 RETURNING *`,
+          SET category=$1, item_name=$2, unit=$3, price=$4, gst_percent=$5, hsn_code=$6, notes=$7, active=$8
+        WHERE id=$9 RETURNING *`,
       [
         category !== undefined ? category : existing.category,
         item_name != null ? String(item_name).trim() : existing.item_name,
         unit != null && String(unit).trim() ? String(unit).trim() : existing.unit,
         price !== undefined && price !== '' ? parseFloat(price) || 0 : existing.price,
+        gst_percent !== undefined && gst_percent !== '' ? parseFloat(gst_percent) || 0 : existing.gst_percent,
+        hsn_code !== undefined ? (String(hsn_code).trim() || null) : existing.hsn_code,
         notes !== undefined ? notes : existing.notes,
         active !== undefined ? !!active : existing.active,
         req.params.id,
@@ -189,13 +195,15 @@ async function insertPrice(body, userId) {
   if (!name) return { error: 'Item name is required' };
   let vendorId = body.vendor_id || null;
   const row = await one(
-    `INSERT INTO ${S}.price_list (category, item_name, unit, price, vendor_id, notes, effective_date, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+    `INSERT INTO ${S}.price_list (category, item_name, unit, price, gst_percent, hsn_code, vendor_id, notes, effective_date, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
     [
       (body.category || '').trim() || null,
       name,
       (body.unit || '').trim() || 'pcs',
       parseFloat(body.price) || 0,
+      parseFloat(body.gst_percent) || 0,
+      (body.hsn_code || '').trim() || null,
       vendorId,
       (body.notes || '').trim() || null,
       body.effective_date || null,

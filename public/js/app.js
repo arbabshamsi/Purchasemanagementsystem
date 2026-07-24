@@ -610,15 +610,16 @@ async function viewPriceList() {
     const rows = list.length ? list.map((p) => `
       <tr>
         <td>${p.category ? `<span class="badge company">${esc(p.category)}</span>` : '—'}</td>
-        <td><strong>${esc(p.item_name)}</strong></td>
+        <td><strong>${esc(p.item_name)}</strong>${p.hsn_code ? `<div class="text-muted" style="font-size:12px">HSN ${esc(p.hsn_code)}</div>` : ''}</td>
         <td>${esc(p.unit)}</td>
         <td class="text-right num">${money(p.price)}</td>
+        <td class="text-right num">${Number(p.gst_percent) ? Number(p.gst_percent) + '%' : '—'}</td>
         <td>${esc(p.vendor_name || '—')}</td>
         ${editable ? `<td class="text-right"><button class="btn btn-outline btn-sm" data-edit="${p.id}">Edit</button> <button class="btn btn-ghost btn-sm" data-del="${p.id}" style="color:var(--danger)">✕</button></td>` : ''}
       </tr>`).join('')
-      : `<tr><td colspan="${editable ? 6 : 5}" class="empty"><div class="empty-icon">💰</div>No prices yet. Add one or upload a CSV.</td></tr>`;
+      : `<tr><td colspan="${editable ? 7 : 6}" class="empty"><div class="empty-icon">💰</div>No prices yet. Add one or upload a CSV.</td></tr>`;
     $('#pl-table').innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>Category</th><th>Item</th><th>Unit</th><th class="text-right">Price</th><th>Vendor</th>${editable ? '<th></th>' : ''}</tr></thead>
+      <thead><tr><th>Category</th><th>Item</th><th>Unit</th><th class="text-right">Price</th><th class="text-right">GST</th><th>Vendor</th>${editable ? '<th></th>' : ''}</tr></thead>
       <tbody>${rows}</tbody></table></div>`;
     if (editable) {
       document.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => priceModal(list.find((p) => p.id == b.dataset.edit))));
@@ -646,18 +647,22 @@ function priceModal(p) {
       <label>Unit<input id="p-unit" value="${edit ? esc(p.unit) : 'pcs'}" /></label>
       <label>Price *<input type="number" id="p-price" step="any" min="0" value="${edit ? p.price : ''}" /></label>
     </div>
+    <div class="form-row">
+      <label>GST %<input type="number" id="p-gst" step="any" min="0" value="${edit && p.gst_percent ? p.gst_percent : ''}" placeholder="e.g. 18"/></label>
+      <label>HSN code<input id="p-hsn" value="${edit ? esc(p.hsn_code || '') : ''}" placeholder="Optional"/></label>
+    </div>
     <label>Notes<input id="p-notes" value="${edit ? esc(p.notes || '') : ''}"/></label>
     <div class="form-actions"><button class="btn btn-outline" onclick="closeModalGlobal()">Cancel</button><button class="btn btn-primary" id="ok">Save</button></div>`);
   $('#ok').onclick = async () => {
     const name = $('#p-name').value.trim(); if (!name) return toast('Item name required', '', 'error');
-    const body = { category: $('#p-cat').value.trim(), item_name: name, unit: $('#p-unit').value.trim() || 'pcs', price: $('#p-price').value, notes: $('#p-notes').value.trim() };
+    const body = { category: $('#p-cat').value.trim(), item_name: name, unit: $('#p-unit').value.trim() || 'pcs', price: $('#p-price').value, gst_percent: $('#p-gst').value, hsn_code: $('#p-hsn').value.trim(), notes: $('#p-notes').value.trim() };
     try { await api(edit ? `/price-list/${p.id}` : '/price-list', { method: edit ? 'PUT' : 'POST', body }); closeModal(); viewPriceList(); toast('Saved'); }
     catch (err) { toast('Could not save', err.message, 'error'); }
   };
 }
 function priceUploadModal() {
   openModal(`<h3>Upload price list (CSV)</h3>
-    <p class="card-sub">Columns: <code>category, item_name, unit, price, vendor, notes</code>. <a href="/api/price-list/template.csv">Download template</a>.</p>
+    <p class="card-sub">Columns: <code>category, item_name, unit, price, gst, hsn, vendor, notes</code>. <a href="/api/price-list/template.csv">Download template</a>.</p>
     <label>CSV file<input type="file" id="pl-file" accept=".csv,text/csv" /></label>
     <div id="pl-res"></div>
     <div class="form-actions"><button class="btn btn-outline" onclick="closeModalGlobal()">Cancel</button><button class="btn btn-primary" id="ok">Upload</button></div>`);

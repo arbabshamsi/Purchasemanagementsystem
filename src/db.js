@@ -223,6 +223,8 @@ CREATE TABLE IF NOT EXISTS ${S}.price_list (
   item_name      text NOT NULL,
   unit           text NOT NULL DEFAULT 'pcs',
   price          numeric(14,2) NOT NULL DEFAULT 0,
+  gst_percent    numeric(6,2) NOT NULL DEFAULT 0,
+  hsn_code       text,
   currency       text NOT NULL DEFAULT 'INR',
   vendor_id      bigint REFERENCES ${S}.vendors(id) ON DELETE SET NULL,
   notes          text,
@@ -234,15 +236,17 @@ CREATE TABLE IF NOT EXISTS ${S}.price_list (
 
 -- Item master: the catalogue of items/commodities everyone picks from.
 CREATE TABLE IF NOT EXISTS ${S}.item_master (
-  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  code       text,
-  name       text NOT NULL,
-  category   text,
-  unit       text NOT NULL DEFAULT 'pcs',
-  notes      text,
-  active     boolean NOT NULL DEFAULT true,
-  created_by bigint REFERENCES ${S}.users(id) ON DELETE SET NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  code        text,
+  name        text NOT NULL,
+  category    text,
+  unit        text NOT NULL DEFAULT 'pcs',
+  hsn_code    text,
+  gst_percent numeric(6,2),
+  notes       text,
+  active      boolean NOT NULL DEFAULT true,
+  created_by  bigint REFERENCES ${S}.users(id) ON DELETE SET NULL,
+  created_at  timestamptz NOT NULL DEFAULT now()
 );
 
 -- Requisitions (the digital slip). Flow:
