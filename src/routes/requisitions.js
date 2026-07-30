@@ -442,4 +442,18 @@ router.post('/:id/cancel', requireAuth, async (req, res, next) => {
   }
 });
 
+// DELETE /api/requisitions/:id  (admin/superadmin only — permanently remove an
+// irrelevant requisition). Items, quotes, quote-items and history are removed
+// automatically via ON DELETE CASCADE.
+router.delete('/:id', requireRole('admin'), async (req, res, next) => {
+  try {
+    const r = await one(`SELECT id, req_number FROM ${S}.requisitions WHERE id = $1`, [req.params.id]);
+    if (!r) return res.status(404).json({ error: 'Requisition not found' });
+    await run(`DELETE FROM ${S}.requisitions WHERE id = $1`, [r.id]);
+    res.json({ ok: true, deleted: r.req_number });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

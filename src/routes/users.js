@@ -76,4 +76,25 @@ router.put('/:id', requireRole('admin'), async (req, res, next) => {
   }
 });
 
+// DELETE /api/users/:id  (admin/superadmin only)
+router.delete('/:id', requireRole('admin'), async (req, res, next) => {
+  try {
+    const user = await one(`SELECT * FROM ${S}.users WHERE id = $1`, [req.params.id]);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (String(user.id) === String(req.user.id)) {
+      return res.status(400).json({ error: 'You cannot delete your own account' });
+    }
+    if (user.role === 'admin') {
+      const admins = await one(`SELECT COUNT(*)::int AS n FROM ${S}.users WHERE role = 'admin' AND active = true`);
+      if (admins.n <= 1) return res.status(400).json({ error: 'Cannot delete the last active admin' });
+    }
+    // References from price_list/item_master/requisitions/history are ON DELETE
+    // SET NULL; sessions cascade. So the row is removed without breaking history.
+    await run(`DELETE FROM ${S}.users WHERE id = $1`, [user.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

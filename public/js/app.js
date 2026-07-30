@@ -363,6 +363,7 @@ async function viewReqDetail(id) {
   if (r.status === 'approved' && can('store')) actions.push(`<button class="btn btn-success" data-act="po">Mark PO made</button>`);
   if (['draft','submitted','sourced'].includes(r.status) && (isOwnerOfReq || can('admin'))) actions.push(`<button class="btn btn-outline" data-act="cancel">Cancel</button>`);
   actions.push(`<button class="btn btn-outline" data-act="print">🖨 Print</button>`);
+  if (can('admin')) actions.push(`<button class="btn btn-danger" data-act="delete">🗑 Delete</button>`);
   setPage(`Requisition ${r.req_number}`, actions.join(''));
 
   const itemRows = r.items.map((it, i) => `
@@ -423,6 +424,12 @@ function comparisonCard(r) {
 
 async function reqAction(act, r) {
   if (act === 'print') return window.print();
+  if (act === 'delete') {
+    if (!confirm(`Permanently delete requisition ${r.req_number}? This removes it, its vendor quotes and history, and cannot be undone.`)) return;
+    try { await api(`/requisitions/${r.id}`, { method: 'DELETE' }); toast('Requisition deleted'); location.hash = '#/requisitions'; }
+    catch (err) { toast('Delete failed', err.message, 'error'); }
+    return;
+  }
   const call = async (path, body) => {
     try { await api(path, { method: 'POST', body }); toast('Done'); viewReqDetail(r.id); }
     catch (err) { toast('Action failed', err.message, 'error'); }
@@ -729,7 +736,7 @@ async function viewUsers() {
     <tr><td><strong>${esc(u.name)}</strong></td><td>${esc(u.email)}</td>
     <td><span class="badge role-${esc(u.role)}">${esc(u.role)}</span></td><td>${esc(u.department || '—')}</td>
     <td>${u.active ? '<span class="badge active">Active</span>' : '<span class="badge cancelled">Inactive</span>'}</td>
-    <td class="text-right"><button class="btn btn-outline btn-sm" data-edit="${u.id}">Edit</button></td></tr>`).join('');
+    <td class="text-right"><button class="btn btn-outline btn-sm" data-edit="${u.id}">Edit</button>${u.id !== State.user.id ? ` <button class="btn btn-danger btn-sm" data-del-user="${u.id}">Delete</button>` : ''}</td></tr>`).join('');
   renderRaw(`
     <div class="card" style="background:var(--primary-soft);border-color:#c7d7fe;font-size:13px">
       <strong>Roles:</strong>
@@ -744,6 +751,12 @@ async function viewUsers() {
       <tbody>${rows}</tbody></table></div>`);
   $('#new-user').onclick = () => userModal();
   document.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => userModal(users.find((u) => u.id == b.dataset.edit))));
+  document.querySelectorAll('[data-del-user]').forEach((b) => (b.onclick = async () => {
+    const u = users.find((x) => x.id == b.dataset.delUser);
+    if (!confirm(`Permanently delete user "${u.name}" (${u.email})? This cannot be undone.`)) return;
+    try { await api(`/users/${u.id}`, { method: 'DELETE' }); toast('User deleted'); viewUsers(); }
+    catch (err) { toast('Delete failed', err.message, 'error'); }
+  }));
 }
 function userModal(u) {
   const edit = !!u;
