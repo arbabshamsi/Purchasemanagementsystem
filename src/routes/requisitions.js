@@ -215,7 +215,10 @@ router.post('/', requireAuth, async (req, res, next) => {
 
     const requisition = await loadRequisition(reqId);
     res.status(201).json({ requisition });
-    if (b.submit) fire(async () => notify.submitted(requisition, await emailsByRole('purchaser', 'admin')));
+    if (b.submit) {
+      fire(async () => notify.submitted(requisition, await emailsByRole('purchaser', 'admin')));
+      if (req.user.email) fire(() => notify.acknowledged(requisition, req.user.email));
+    }
   } catch (err) {
     next(err);
   }
@@ -273,6 +276,7 @@ router.post('/:id/submit', requireAuth, async (req, res, next) => {
     const requisition = await loadRequisition(r.id);
     res.json({ requisition });
     fire(async () => notify.submitted(requisition, await emailsByRole('purchaser', 'admin')));
+    if (req.user.email) fire(() => notify.acknowledged(requisition, req.user.email));
   } catch (err) {
     next(err);
   }

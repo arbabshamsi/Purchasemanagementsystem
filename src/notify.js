@@ -2,50 +2,90 @@
 
 const config = require('./config');
 
-/**
- * Send an email via Resend if configured; otherwise log and skip (the in-app
- * queues remain the source of truth, so nothing breaks without email). The
- * owner is always CC'd so they get a copy on their Google Workspace.
- */
-async function sendEmail({ to, subject, html, text }) {
-  const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
-  const cc = config.ownerEmail && !recipients.includes(config.ownerEmail) ? [config.ownerEmail] : [];
+// Lazily-created SMTP transport (cached across warm serverless invocations).
+let _smtp = null;
+function smtpTransport() {
+  if (_smtp) return _smtp;
+  // Required lazily so the app runs even if nodemailer isn't installed.
+  // eslint-disable-next-line global-require
+  const nodemailer = require('nodemailer');
+  _smtp = nodemailer.createTransport({
+    host: config.smtpHost,
+    port: config.smtpPort,
+    secure: config.smtpSecure,
+    auth: { user: config.smtpUser, pass: config.smtpPass },
+  });
+  return _smtp;
+}
 
-  if (!config.resendApiKey) {
-    // eslint-disable-next-line no-console
-    console.log(`[notify] (email disabled) "${subject}" -> ${recipients.join(', ')}`);
-    return { skipped: true };
-  }
+/**
+ * Send an email. Delivery order: SMTP (e.g. Google Workspace) → Resend →
+ * disabled (log & skip). The in-app queues remain the source of truth, so
+ * nothing breaks when email is off. The owner is CC'd unless ccOwner === false.
+ */
+async function sendEmail({ to, subject, html, text, ccOwner = true }) {
+  const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
+  const cc =
+    ccOwner && config.ownerEmail && !recipients.includes(config.ownerEmail)
+      ? [config.ownerEmail]
+      : [];
   if (!recipients.length && !cc.length) return { skipped: true };
 
-  try {
-    const res = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.resendApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
+  // 1) SMTP — send through your own mailbox (Google Workspace / Gmail).
+  if (config.smtpHost && config.smtpUser && config.smtpPass) {
+    try {
+      await smtpTransport().sendMail({
         from: config.mailFrom,
         to: recipients.length ? recipients : cc,
         cc: recipients.length ? cc : undefined,
         subject,
         html,
         text: text || undefined,
-      }),
-    });
-    if (!res.ok) {
-      const body = await res.text();
+      });
+      return { ok: true };
+    } catch (err) {
       // eslint-disable-next-line no-console
-      console.error(`[notify] email failed (${res.status}): ${body}`);
+      console.error('[notify] smtp error:', err.message);
       return { ok: false };
     }
-    return { ok: true };
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error('[notify] email error:', err.message);
-    return { ok: false };
   }
+
+  // 2) Resend HTTP API.
+  if (config.resendApiKey) {
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.resendApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: config.mailFrom,
+          to: recipients.length ? recipients : cc,
+          cc: recipients.length ? cc : undefined,
+          subject,
+          html,
+          text: text || undefined,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        // eslint-disable-next-line no-console
+        console.error(`[notify] email failed (${res.status}): ${body}`);
+        return { ok: false };
+      }
+      return { ok: true };
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[notify] email error:', err.message);
+      return { ok: false };
+    }
+  }
+
+  // 3) Not configured — log and skip.
+  // eslint-disable-next-line no-console
+  console.log(`[notify] (email disabled) "${subject}" -> ${recipients.join(', ')}`);
+  return { skipped: true };
 }
 
 function wrap(title, bodyHtml, req) {
@@ -65,6 +105,22 @@ function wrap(title, bodyHtml, req) {
 
 /** Fire-and-forget notification helpers for each workflow step. */
 const notify = {
+  // Confirmation to the person who raised the requisition.
+  async acknowledged(req, to) {
+    await sendEmail({
+      to,
+      ccOwner: false,
+      subject: `Requisition ${req.req_number} received`,
+      html: wrap(
+        'Requisition received',
+        `<p>Hi ${esc(req.requested_by_name || 'there')},</p>
+         <p>Your requisition <b>${req.req_number}</b> has been submitted and sent to the
+            purchase team for sourcing and approval. You'll get an email once it is
+            approved or rejected.</p>`,
+        req
+      ),
+    });
+  },
   async submitted(req, recipients) {
     await sendEmail({
       to: recipients,

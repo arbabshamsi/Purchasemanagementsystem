@@ -55,11 +55,25 @@ const config = {
   // Default currency for prices / amounts.
   currency: process.env.CURRENCY || 'INR',
 
-  // Email notifications (optional). If RESEND_API_KEY is set, notifications are
-  // sent via Resend; otherwise they are logged and skipped (the in-app queues
-  // still work). The owner is CC'd on every notification.
+  // Email notifications (optional). Delivery uses, in order of preference:
+  //   1) SMTP (e.g. your Google Workspace mailbox) — set SMTP_HOST/USER/PASS.
+  //   2) Resend HTTP API — set RESEND_API_KEY.
+  //   3) Neither — notifications are logged and skipped (in-app queues still work).
+  // The owner is CC'd on workflow notifications so they always get a copy.
   resendApiKey: process.env.RESEND_API_KEY || '',
-  mailFrom: process.env.MAIL_FROM || 'Purchase System <onboarding@resend.dev>',
+  // SMTP transport (works with Google Workspace / Gmail using an App Password).
+  smtpHost: process.env.SMTP_HOST || '',
+  smtpPort: parseInt(process.env.SMTP_PORT, 10) || 587,
+  smtpUser: process.env.SMTP_USER || '',
+  smtpPass: process.env.SMTP_PASS || '',
+  smtpSecure: process.env.SMTP_SECURE === 'true' || parseInt(process.env.SMTP_PORT, 10) === 465,
+  // "From" address. Defaults to the SMTP mailbox when SMTP is used, else the
+  // Resend test sender. For Resend you must verify your domain and set MAIL_FROM.
+  mailFrom:
+    process.env.MAIL_FROM ||
+    (process.env.SMTP_USER
+      ? `Paramount Purchase <${process.env.SMTP_USER}>`
+      : 'Purchase System <onboarding@resend.dev>'),
   ownerEmail:
     process.env.NOTIFY_OWNER_EMAIL || process.env.OWNER_EMAIL || 'arbab@paramounthomecollections.com',
   appUrl: process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'https://purchasemanagementsystem.vercel.app',
