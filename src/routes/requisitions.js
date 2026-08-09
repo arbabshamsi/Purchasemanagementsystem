@@ -112,12 +112,19 @@ async function emailsByRole(...roles) {
   return rows.map((r) => r.email);
 }
 
-/** Run a notification best-effort — never blocks or breaks the request. */
-function fire(factory) {
-  Promise.resolve()
-    .then(factory)
+/**
+ * Send a notification best-effort. On Vercel's serverless runtime any work left
+ * pending after the HTTP response is frozen, so notifications must be AWAITED
+ * before res.json() — otherwise the email never actually goes out. Errors are
+ * swallowed so a mail hiccup never breaks the workflow action.
+ */
+async function notifySafe(factory) {
+  try {
+    await factory();
+  } catch (e) {
     // eslint-disable-next-line no-console
-    .catch((e) => console.error('[notify]', e && e.message));
+    console.error('[notify]', e && e.message);
+  }
 }
 
 /* ---------- list & summary ---------- */
@@ -214,11 +221,11 @@ router.post('/', requireAuth, async (req, res, next) => {
     });
 
     const requisition = await loadRequisition(reqId);
-    res.status(201).json({ requisition });
     if (b.submit) {
-      fire(async () => notify.submitted(requisition, await emailsByRole('purchaser', 'admin')));
-      if (req.user.email) fire(() => notify.acknowledged(requisition, req.user.email));
+      await notifySafe(async () => notify.submitted(requisition, await emailsByRole('purchaser', 'admin')));
+      if (req.user.email) await notifySafe(() => notify.acknowledged(requisition, req.user.email));
     }
+    res.status(201).json({ requisition });
   } catch (err) {
     next(err);
   }
@@ -274,9 +281,9 @@ router.post('/:id/submit', requireAuth, async (req, res, next) => {
       await logHistory(c, r.id, 'submitted', 'Submitted for sourcing', req.user.id);
     });
     const requisition = await loadRequisition(r.id);
+    await notifySafe(async () => notify.submitted(requisition, await emailsByRole('purchaser', 'admin')));
+    if (req.user.email) await notifySafe(() => notify.acknowledged(requisition, req.user.email));
     res.json({ requisition });
-    fire(async () => notify.submitted(requisition, await emailsByRole('purchaser', 'admin')));
-    if (req.user.email) fire(() => notify.acknowledged(requisition, req.user.email));
   } catch (err) {
     next(err);
   }
@@ -340,8 +347,8 @@ router.post('/:id/source', requireRole('purchaser'), async (req, res, next) => {
     const requisition = await loadRequisition(r.id);
     const awardedQuote = requisition.quotes.find((q) => q.is_awarded);
     requisition.awarded_total_display = awardedQuote ? String(awardedQuote.total_amount) : '';
+    await notifySafe(async () => notify.sourced(requisition, await emailsByRole('approver', 'admin')));
     res.json({ requisition });
-    fire(async () => notify.sourced(requisition, await emailsByRole('approver', 'admin')));
   } catch (err) {
     next(err);
   }
@@ -364,13 +371,13 @@ router.post('/:id/approve', requireRole('approver'), async (req, res, next) => {
       await logHistory(c, r.id, 'approved', note || 'Approved for purchase', req.user.id);
     });
     const requisition = await loadRequisition(r.id);
-    res.json({ requisition });
-    fire(async () => {
+    await notifySafe(async () => {
       const recips = new Set(await emailsByRole('store', 'admin'));
       const requester = await one(`SELECT email FROM ${S}.users WHERE id = $1`, [r.requested_by]);
       if (requester && requester.email) recips.add(requester.email);
       return notify.decided(requisition, [...recips], true);
     });
+    res.json({ requisition });
   } catch (err) {
     next(err);
   }
@@ -391,11 +398,11 @@ router.post('/:id/reject', requireRole('approver'), async (req, res, next) => {
       await logHistory(c, r.id, 'rejected', note || 'Rejected', req.user.id);
     });
     const requisition = await loadRequisition(r.id);
-    res.json({ requisition });
-    fire(async () => {
+    await notifySafe(async () => {
       const requester = await one(`SELECT email FROM ${S}.users WHERE id = $1`, [r.requested_by]);
       return notify.decided(requisition, requester && requester.email ? [requester.email] : [], false);
     });
+    res.json({ requisition });
   } catch (err) {
     next(err);
   }
@@ -415,11 +422,11 @@ router.post('/:id/po-made', requireRole('store'), async (req, res, next) => {
       await logHistory(c, r.id, 'po_made', ref ? `PO made (${ref})` : 'PO made in Tally', req.user.id);
     });
     const requisition = await loadRequisition(r.id);
-    res.json({ requisition });
-    fire(async () => {
+    await notifySafe(async () => {
       const requester = await one(`SELECT email FROM ${S}.users WHERE id = $1`, [r.requested_by]);
       return notify.poMade(requisition, requester && requester.email ? [requester.email] : []);
     });
+    res.json({ requisition });
   } catch (err) {
     next(err);
   }

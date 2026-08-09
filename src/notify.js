@@ -14,6 +14,10 @@ function smtpTransport() {
     port: config.smtpPort,
     secure: config.smtpSecure,
     auth: { user: config.smtpUser, pass: config.smtpPass },
+    // Fail fast instead of hanging a serverless request if SMTP is unreachable.
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
   });
   return _smtp;
 }
@@ -46,7 +50,7 @@ async function sendEmail({ to, subject, html, text, ccOwner = true }) {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[notify] smtp error:', err.message);
-      return { ok: false };
+      return { ok: false, error: err.message };
     }
   }
 
@@ -72,13 +76,13 @@ async function sendEmail({ to, subject, html, text, ccOwner = true }) {
         const body = await res.text();
         // eslint-disable-next-line no-console
         console.error(`[notify] email failed (${res.status}): ${body}`);
-        return { ok: false };
+        return { ok: false, error: `HTTP ${res.status}: ${body}` };
       }
       return { ok: true };
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[notify] email error:', err.message);
-      return { ok: false };
+      return { ok: false, error: err.message };
     }
   }
 
@@ -103,8 +107,22 @@ function wrap(title, bodyHtml, req) {
     </div>`;
 }
 
-/** Fire-and-forget notification helpers for each workflow step. */
+/** Notification helpers for each workflow step. */
 const notify = {
+  // Diagnostic: send a simple test email and return the transport result.
+  async test(to) {
+    return sendEmail({
+      to,
+      ccOwner: false,
+      subject: 'Purchase System — test email',
+      html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto">
+        <h2 style="color:#1e3a8a">Email is working ✅</h2>
+        <p>This is a test message from your Purchase Management System. If you can read
+           this, outgoing email is set up correctly.</p>
+        <p style="color:#64748b;font-size:12px;margin-top:20px">Paramount Home Collections — Purchase Management System</p>
+      </div>`,
+    });
+  },
   // Confirmation to the person who raised the requisition.
   async acknowledged(req, to) {
     await sendEmail({
