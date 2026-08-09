@@ -33,6 +33,13 @@ app.get('/api/health', (req, res) =>
         : config.databaseUrl
         ? 'database-url'
         : 'none',
+    // How outgoing email is configured (never exposes any secret value).
+    mail:
+      config.smtpHost && config.smtpUser && config.smtpPass
+        ? 'smtp'
+        : config.resendApiKey
+        ? 'resend'
+        : 'off',
     time: new Date().toISOString(),
   })
 );
