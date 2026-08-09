@@ -44,28 +44,6 @@ app.get('/api/health', (req, res) =>
   })
 );
 
-// Diagnostic: send a test email to the owner and report the transport result.
-// Never exposes any secret; it only ever emails the configured owner address,
-// so it can't be used to spam arbitrary recipients.
-app.get('/api/health/mail-test', async (req, res) => {
-  try {
-    const { notify } = require('./src/notify');
-    const result = await notify.test(config.ownerEmail);
-    res.json({
-      transport:
-        config.smtpHost && config.smtpUser && config.smtpPass
-          ? 'smtp'
-          : config.resendApiKey
-          ? 'resend'
-          : 'off',
-      to: config.ownerEmail,
-      result,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // Ensure the database schema + seed exist before handling API calls.
 // Memoised in db.js, so this is effectively a no-op after the first request.
 app.use('/api', async (req, res, next) => {
