@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { query, one, run, tx, S } = require('../db');
+const { query, one, run, runTx, S } = require('../db');
 const { requireAuth, requireRole } = require('../auth');
 const { notify } = require('../notify');
 
@@ -24,16 +24,18 @@ async function nextReqNumber(c) {
   return `${prefix}${String(seq).padStart(4, '0')}`;
 }
 
-async function logHistory(c, reqId, action, note, userId) {
-  await c.run(
-    `INSERT INTO ${S}.requisition_history (requisition_id, action, note, user_id) VALUES ($1,$2,$3,$4)`,
-    [reqId, action, note || null, userId || null]
-  );
+// Builder: a single { q, p } statement that records a history entry.
+function historyStmt(reqId, action, note, userId) {
+  return {
+    q: `INSERT INTO ${S}.requisition_history (requisition_id, action, note, user_id) VALUES ($1,$2,$3,$4)`,
+    p: [reqId, action, note || null, userId || null],
+  };
 }
 
-async function writeItems(c, reqId, items) {
-  await c.run(`DELETE FROM ${S}.requisition_items WHERE requisition_id = $1`, [reqId]);
-  // Build one multi-row INSERT instead of one round-trip per line item.
+// Builder: the DELETE + one multi-row INSERT that (re)writes a requisition's
+// items, returned as { q, p } statements so they run inside one atomic tx.
+function itemStatements(reqId, items) {
+  const out = [{ q: `DELETE FROM ${S}.requisition_items WHERE requisition_id = $1`, p: [reqId] }];
   const params = [];
   const rows = [];
   let order = 0;
@@ -53,13 +55,15 @@ async function writeItems(c, reqId, items) {
     );
     rows.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8})`);
   }
-  if (!rows.length) return;
-  await c.run(
-    `INSERT INTO ${S}.requisition_items
-       (requisition_id, product_description, quantity, unit, size, purpose, fixed_rate, sort_order)
-     VALUES ${rows.join(',')}`,
-    params
-  );
+  if (rows.length) {
+    out.push({
+      q: `INSERT INTO ${S}.requisition_items
+            (requisition_id, product_description, quantity, unit, size, purpose, fixed_rate, sort_order)
+          VALUES ${rows.join(',')}`,
+      p: params,
+    });
+  }
+  return out;
 }
 
 /** Full requisition with items, quotes (+ quote items), history and names. */
@@ -204,38 +208,70 @@ router.post('/', requireAuth, async (req, res, next) => {
     const items = Array.isArray(b.items) ? b.items.filter((i) => (i.product_description || '').trim()) : [];
     if (!items.length) return res.status(400).json({ error: 'Add at least one item' });
     const company = await one(`SELECT id FROM ${S}.companies ORDER BY id LIMIT 1`);
+    const number = await nextReqNumber({ one });
+    const submit = !!b.submit;
+    const status = submit ? 'submitted' : 'draft';
 
-    const reqId = await tx(async (c) => {
-      const number = await nextReqNumber(c);
-      const status = b.submit ? 'submitted' : 'draft';
-      const row = await c.one(
-        `INSERT INTO ${S}.requisitions
+    const itemsJson = items.map((it, i) => ({
+      product_description: (it.product_description || '').trim(),
+      quantity: parseFloat(it.quantity) || 0,
+      unit: (it.unit || '').trim() || null,
+      size: (it.size || '').trim() || null,
+      purpose: (it.purpose || '').trim() || null,
+      fixed_rate: it.fixed_rate !== undefined && it.fixed_rate !== '' ? parseFloat(it.fixed_rate) || 0 : null,
+      sort_order: i,
+    }));
+
+    const params = [
+      number,
+      company ? company.id : null,
+      req.user.id,
+      (b.requested_by_name || req.user.name || '').trim() || req.user.name,
+      (b.department || req.user.department || '').trim() || null,
+      (b.party_name || '').trim() || null,
+      b.request_importance || 'normal',
+      (b.payment_mode || '').trim() || null,
+      (b.required_time || '').trim() || null,
+      b.expected_inhouse_date || null,
+      status,
+      (b.notes || '').trim() || null,
+      JSON.stringify(itemsJson),
+      `Requisition ${number} created`,
+    ];
+    let histValues = `('created', $14::text)`;
+    if (submit) {
+      params.push('Submitted for sourcing');
+      histValues += `, ('submitted', $15::text)`;
+    }
+
+    // One atomic statement: the requisition, its items and history land together
+    // or not at all (a data-modifying CTE — see sql/pms_rpc.sql for the runner).
+    const created = await one(
+      `WITH req AS (
+         INSERT INTO ${S}.requisitions
            (req_number, company_id, requested_by, requested_by_name, department, party_name,
             request_importance, payment_mode, required_time, expected_inhouse_date, status, notes, created_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$3) RETURNING id`,
-        [
-          number,
-          company ? company.id : null,
-          req.user.id,
-          (b.requested_by_name || req.user.name || '').trim() || req.user.name,
-          (b.department || req.user.department || '').trim() || null,
-          (b.party_name || '').trim() || null,
-          b.request_importance || 'normal',
-          (b.payment_mode || '').trim() || null,
-          (b.required_time || '').trim() || null,
-          b.expected_inhouse_date || null,
-          status,
-          (b.notes || '').trim() || null,
-        ]
-      );
-      await writeItems(c, row.id, items);
-      await logHistory(c, row.id, 'created', `Requisition ${number} created`, req.user.id);
-      if (b.submit) await logHistory(c, row.id, 'submitted', 'Submitted for sourcing', req.user.id);
-      return row.id;
-    });
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$3)
+         RETURNING id
+       ),
+       it AS (
+         INSERT INTO ${S}.requisition_items
+           (requisition_id, product_description, quantity, unit, size, purpose, fixed_rate, sort_order)
+         SELECT req.id, x.product_description, x.quantity, x.unit, x.size, x.purpose, x.fixed_rate, x.sort_order
+         FROM req, jsonb_to_recordset($13::jsonb)
+           AS x(product_description text, quantity numeric, unit text, size text, purpose text, fixed_rate numeric, sort_order int)
+       ),
+       h AS (
+         INSERT INTO ${S}.requisition_history (requisition_id, action, note, user_id)
+         SELECT req.id, a.action, a.note, $3 FROM req, (VALUES ${histValues}) AS a(action, note)
+       )
+       SELECT id FROM req`,
+      params
+    );
+    const reqId = created.id;
 
     const requisition = await loadRequisition(reqId);
-    if (b.submit) {
+    if (submit) {
       await notifySafe(async () => notify.submitted(requisition, await emailsByRole('purchaser', 'admin')));
       if (req.user.email) await notifySafe(() => notify.acknowledged(requisition, req.user.email));
     }
@@ -255,13 +291,13 @@ router.put('/:id', requireAuth, async (req, res, next) => {
       return res.status(403).json({ error: 'You can only edit your own draft' });
     }
     const b = req.body || {};
-    await tx(async (c) => {
-      await c.run(
-        `UPDATE ${S}.requisitions
-            SET department=$1, party_name=$2, request_importance=$3, payment_mode=$4,
-                required_time=$5, expected_inhouse_date=$6, notes=$7
-          WHERE id=$8`,
-        [
+    const stmts = [
+      {
+        q: `UPDATE ${S}.requisitions
+              SET department=$1, party_name=$2, request_importance=$3, payment_mode=$4,
+                  required_time=$5, expected_inhouse_date=$6, notes=$7
+            WHERE id=$8`,
+        p: [
           (b.department || '').trim() || null,
           (b.party_name || '').trim() || null,
           b.request_importance || r.request_importance,
@@ -270,11 +306,12 @@ router.put('/:id', requireAuth, async (req, res, next) => {
           b.expected_inhouse_date || null,
           (b.notes || '').trim() || null,
           r.id,
-        ]
-      );
-      if (Array.isArray(b.items)) await writeItems(c, r.id, b.items);
-      await logHistory(c, r.id, 'updated', 'Draft updated', req.user.id);
-    });
+        ],
+      },
+    ];
+    if (Array.isArray(b.items)) stmts.push(...itemStatements(r.id, b.items));
+    stmts.push(historyStmt(r.id, 'updated', 'Draft updated', req.user.id));
+    await runTx(stmts);
     res.json({ requisition: await loadRequisition(r.id) });
   } catch (err) {
     next(err);
@@ -290,10 +327,10 @@ router.post('/:id/submit', requireAuth, async (req, res, next) => {
     if (r.created_by !== req.user.id && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'You can only submit your own requisition' });
     }
-    await tx(async (c) => {
-      await c.run(`UPDATE ${S}.requisitions SET status='submitted' WHERE id=$1`, [r.id]);
-      await logHistory(c, r.id, 'submitted', 'Submitted for sourcing', req.user.id);
-    });
+    await runTx([
+      { q: `UPDATE ${S}.requisitions SET status='submitted' WHERE id=$1`, p: [r.id] },
+      historyStmt(r.id, 'submitted', 'Submitted for sourcing', req.user.id),
+    ]);
     const requisition = await loadRequisition(r.id);
     await notifySafe(async () => notify.submitted(requisition, await emailsByRole('purchaser', 'admin')));
     if (req.user.email) await notifySafe(() => notify.acknowledged(requisition, req.user.email));
@@ -331,59 +368,60 @@ router.post('/:id/source', requireRole('purchaser'), async (req, res, next) => {
     const qtyById = Object.fromEntries(items.map((i) => [i.id, Number(i.quantity) || 0]));
     const validQuotes = quotes.filter((q) => q.vendor_id);
 
-    await tx(async (c) => {
-      await c.run(`DELETE FROM ${S}.requisition_quotes WHERE requisition_id = $1`, [r.id]);
-
-      // Insert all vendor quotes in one round-trip; map returned ids back by vendor.
-      const qParams = [];
-      const qRows = [];
-      for (const q of validQuotes) {
-        let total = 0;
-        for (const [itemId, rate] of Object.entries(q.item_rates || {})) {
-          total += (parseFloat(rate) || 0) * (qtyById[itemId] || 0);
-        }
-        const base = qParams.length;
-        qParams.push(r.id, q.vendor_id, String(q.vendor_id) === String(awarded), +total.toFixed(2), (q.notes || '').trim() || null);
-        qRows.push(`($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5})`);
+    // Vendor quotes and their line-items as JSON, each carrying vendor_id so the
+    // DB can join line-items back to the freshly-inserted quote ids in one CTE.
+    const quotesJson = validQuotes.map((q) => {
+      let total = 0;
+      for (const [itemId, rate] of Object.entries(q.item_rates || {})) {
+        total += (parseFloat(rate) || 0) * (qtyById[itemId] || 0);
       }
-      const insertedQuotes = qRows.length
-        ? await c.query(
-            `INSERT INTO ${S}.requisition_quotes (requisition_id, vendor_id, is_awarded, total_amount, notes)
-             VALUES ${qRows.join(',')} RETURNING id, vendor_id`,
-            qParams
-          )
-        : [];
-      const quoteIdByVendor = Object.fromEntries(insertedQuotes.map((row) => [String(row.vendor_id), row.id]));
-
-      // Insert all quote line-items in one round-trip.
-      const liParams = [];
-      const liRows = [];
-      for (const q of validQuotes) {
-        const quoteId = quoteIdByVendor[String(q.vendor_id)];
-        if (!quoteId) continue;
-        for (const [itemId, rate] of Object.entries(q.item_rates || {})) {
-          const rt = parseFloat(rate) || 0;
-          const base = liParams.length;
-          liParams.push(quoteId, itemId, rt, +(rt * (qtyById[itemId] || 0)).toFixed(2));
-          liRows.push(`($${base + 1},$${base + 2},$${base + 3},$${base + 4})`);
-        }
-      }
-      if (liRows.length) {
-        await c.run(
-          `INSERT INTO ${S}.requisition_quote_items (quote_id, requisition_item_id, rate, amount)
-           VALUES ${liRows.join(',')}`,
-          liParams
-        );
-      }
-
-      await c.run(
-        `UPDATE ${S}.requisitions
-            SET status='sourced', proposed_vendor_id=$1, purchaser_id=$2, purchaser_note=$3
-          WHERE id=$4`,
-        [awarded, req.user.id, (b.purchaser_note || '').trim() || null, r.id]
-      );
-      await logHistory(c, r.id, 'sourced', 'Vendor proposed for approval', req.user.id);
+      return {
+        vendor_id: Number(q.vendor_id),
+        is_awarded: String(q.vendor_id) === String(awarded),
+        total_amount: +total.toFixed(2),
+        notes: (q.notes || '').trim() || null,
+      };
     });
+    const liJson = [];
+    for (const q of validQuotes) {
+      for (const [itemId, rate] of Object.entries(q.item_rates || {})) {
+        const rt = parseFloat(rate) || 0;
+        liJson.push({
+          vendor_id: Number(q.vendor_id),
+          requisition_item_id: Number(itemId),
+          rate: rt,
+          amount: +(rt * (qtyById[itemId] || 0)).toFixed(2),
+        });
+      }
+    }
+
+    // One atomic statement: clear old quotes, insert new quotes + line-items,
+    // advance status and log history together or not at all.
+    await run(
+      `WITH del AS (
+         DELETE FROM ${S}.requisition_quotes WHERE requisition_id = $1
+       ),
+       q AS (
+         INSERT INTO ${S}.requisition_quotes (requisition_id, vendor_id, is_awarded, total_amount, notes)
+         SELECT $1, x.vendor_id, x.is_awarded, x.total_amount, x.notes
+         FROM jsonb_to_recordset($2::jsonb) AS x(vendor_id bigint, is_awarded boolean, total_amount numeric, notes text)
+         RETURNING id, vendor_id
+       ),
+       li AS (
+         INSERT INTO ${S}.requisition_quote_items (quote_id, requisition_item_id, rate, amount)
+         SELECT q.id, y.requisition_item_id, y.rate, y.amount
+         FROM jsonb_to_recordset($3::jsonb) AS y(vendor_id bigint, requisition_item_id bigint, rate numeric, amount numeric)
+         JOIN q ON q.vendor_id = y.vendor_id
+       ),
+       upd AS (
+         UPDATE ${S}.requisitions
+            SET status='sourced', proposed_vendor_id=$4, purchaser_id=$5, purchaser_note=$6
+          WHERE id=$1
+       )
+       INSERT INTO ${S}.requisition_history (requisition_id, action, note, user_id)
+       VALUES ($1, 'sourced', 'Vendor proposed for approval', $5)`,
+      [r.id, JSON.stringify(quotesJson), JSON.stringify(liJson), awarded, req.user.id, (b.purchaser_note || '').trim() || null]
+    );
 
     const requisition = await loadRequisition(r.id);
     const awardedQuote = requisition.quotes.find((q) => q.is_awarded);
@@ -404,13 +442,13 @@ router.post('/:id/approve', requireRole('approver'), async (req, res, next) => {
     if (!r) return res.status(404).json({ error: 'Requisition not found' });
     if (r.status !== 'sourced') return res.status(409).json({ error: 'Only sourced requisitions can be approved' });
     const note = (req.body && req.body.note) || null;
-    await tx(async (c) => {
-      await c.run(
-        `UPDATE ${S}.requisitions SET status='approved', approved_by=$1, approved_at=now(), decision_note=$2 WHERE id=$3`,
-        [req.user.id, note, r.id]
-      );
-      await logHistory(c, r.id, 'approved', note || 'Approved for purchase', req.user.id);
-    });
+    await runTx([
+      {
+        q: `UPDATE ${S}.requisitions SET status='approved', approved_by=$1, approved_at=now(), decision_note=$2 WHERE id=$3`,
+        p: [req.user.id, note, r.id],
+      },
+      historyStmt(r.id, 'approved', note || 'Approved for purchase', req.user.id),
+    ]);
     const requisition = await loadRequisition(r.id);
     await notifySafe(async () => {
       const recips = new Set(await emailsByRole('store', 'admin'));
@@ -431,13 +469,13 @@ router.post('/:id/reject', requireRole('approver'), async (req, res, next) => {
     if (!r) return res.status(404).json({ error: 'Requisition not found' });
     if (r.status !== 'sourced') return res.status(409).json({ error: 'Only sourced requisitions can be rejected' });
     const note = (req.body && req.body.note) || null;
-    await tx(async (c) => {
-      await c.run(
-        `UPDATE ${S}.requisitions SET status='rejected', approved_by=$1, approved_at=now(), decision_note=$2 WHERE id=$3`,
-        [req.user.id, note, r.id]
-      );
-      await logHistory(c, r.id, 'rejected', note || 'Rejected', req.user.id);
-    });
+    await runTx([
+      {
+        q: `UPDATE ${S}.requisitions SET status='rejected', approved_by=$1, approved_at=now(), decision_note=$2 WHERE id=$3`,
+        p: [req.user.id, note, r.id],
+      },
+      historyStmt(r.id, 'rejected', note || 'Rejected', req.user.id),
+    ]);
     const requisition = await loadRequisition(r.id);
     await notifySafe(async () => {
       const requester = await one(`SELECT email FROM ${S}.users WHERE id = $1`, [r.requested_by]);
@@ -458,10 +496,10 @@ router.post('/:id/po-made', requireRole('store'), async (req, res, next) => {
     if (!r) return res.status(404).json({ error: 'Requisition not found' });
     if (r.status !== 'approved') return res.status(409).json({ error: 'Only approved requisitions can be marked PO-made' });
     const ref = (req.body && req.body.po_reference) || null;
-    await tx(async (c) => {
-      await c.run(`UPDATE ${S}.requisitions SET status='po_made', po_reference=$1 WHERE id=$2`, [ref, r.id]);
-      await logHistory(c, r.id, 'po_made', ref ? `PO made (${ref})` : 'PO made in Tally', req.user.id);
-    });
+    await runTx([
+      { q: `UPDATE ${S}.requisitions SET status='po_made', po_reference=$1 WHERE id=$2`, p: [ref, r.id] },
+      historyStmt(r.id, 'po_made', ref ? `PO made (${ref})` : 'PO made in Tally', req.user.id),
+    ]);
     const requisition = await loadRequisition(r.id);
     await notifySafe(async () => {
       const requester = await one(`SELECT email FROM ${S}.users WHERE id = $1`, [r.requested_by]);
@@ -484,10 +522,10 @@ router.post('/:id/cancel', requireAuth, async (req, res, next) => {
     if (r.created_by !== req.user.id && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'You can only cancel your own requisition' });
     }
-    await tx(async (c) => {
-      await c.run(`UPDATE ${S}.requisitions SET status='cancelled' WHERE id=$1`, [r.id]);
-      await logHistory(c, r.id, 'cancelled', (req.body && req.body.note) || 'Cancelled', req.user.id);
-    });
+    await runTx([
+      { q: `UPDATE ${S}.requisitions SET status='cancelled' WHERE id=$1`, p: [r.id] },
+      historyStmt(r.id, 'cancelled', (req.body && req.body.note) || 'Cancelled', req.user.id),
+    ]);
     res.json({ requisition: await loadRequisition(r.id) });
   } catch (err) {
     next(err);

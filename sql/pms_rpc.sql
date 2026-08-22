@@ -85,8 +85,37 @@ begin
 end;
 $function$;
 
+-- Atomic multi-statement runner: executes an ordered array of { "q": sql,
+-- "p": [params] } inside ONE transaction (the function body). Any statement that
+-- raises aborts the whole call, so a mid-sequence failure rolls everything back.
+-- Used by db.js runTx() for the requisition workflow writes.
+CREATE OR REPLACE FUNCTION public.pms_exec_tx(stmts jsonb)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'pms', 'public'
+AS $function$
+declare
+  stmt jsonb;
+  bound text;
+  total int := 0;
+  cnt int;
+begin
+  if stmts is null then return 0; end if;
+  for stmt in select * from jsonb_array_elements(stmts) loop
+    bound := public.pms_bind(stmt->>'q', coalesce(stmt->'p', '[]'::jsonb));
+    execute bound;
+    get diagnostics cnt = row_count;
+    total := total + cnt;
+  end loop;
+  return total;
+end;
+$function$;
+
 -- Only the service role (used by the server) may call these.
 REVOKE ALL ON FUNCTION public.pms_exec_rows(text, jsonb) FROM public, anon, authenticated;
 REVOKE ALL ON FUNCTION public.pms_exec_run(text, jsonb)  FROM public, anon, authenticated;
+REVOKE ALL ON FUNCTION public.pms_exec_tx(jsonb)         FROM public, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.pms_exec_rows(text, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.pms_exec_run(text, jsonb)  TO service_role;
+GRANT EXECUTE ON FUNCTION public.pms_exec_tx(jsonb)         TO service_role;

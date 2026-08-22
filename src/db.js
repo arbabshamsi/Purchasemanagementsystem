@@ -118,6 +118,12 @@ async function rpcRun(text, params) {
   if (error) throw new Error(error.message || 'Database error');
   return { rowCount: typeof data === 'number' ? data : 0 };
 }
+// Run an ordered array of { q, p } statements inside ONE transaction (atomic).
+async function rpcTx(statements) {
+  const { data, error } = await getClient().rpc('pms_exec_tx', { stmts: statements });
+  if (error) throw new Error(error.message || 'Database error');
+  return { rowCount: typeof data === 'number' ? data : 0 };
+}
 
 /** Run a query and return the rows. */
 async function query(text, params) {
@@ -168,6 +174,32 @@ async function tx(fn) {
     const out = await fn(helper);
     await client.query('COMMIT');
     return out;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Run an ordered list of { q, p } statements atomically (all-or-nothing).
+ * Production (client mode): one pms_exec_tx RPC = one server-side transaction.
+ * Local dev (pg): a real BEGIN/COMMIT on one connection.
+ * Use this for multi-statement workflow writes so a mid-sequence failure can
+ * never leave a requisition half-written.
+ */
+async function runTx(statements) {
+  const stmts = (statements || []).filter(Boolean);
+  if (!stmts.length) return { rowCount: 0 };
+  if (useClient) return rpcTx(stmts);
+  const pool = await getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const s of stmts) await client.query(s.q, s.p || []);
+    await client.query('COMMIT');
+    return { rowCount: 0 };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -377,6 +409,7 @@ module.exports = {
   one,
   run,
   tx,
+  runTx,
   ensureReady,
   S,
   useClient,
