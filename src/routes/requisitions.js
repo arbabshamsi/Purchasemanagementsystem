@@ -33,26 +33,33 @@ async function logHistory(c, reqId, action, note, userId) {
 
 async function writeItems(c, reqId, items) {
   await c.run(`DELETE FROM ${S}.requisition_items WHERE requisition_id = $1`, [reqId]);
+  // Build one multi-row INSERT instead of one round-trip per line item.
+  const params = [];
+  const rows = [];
   let order = 0;
   for (const it of items || []) {
     const desc = (it.product_description || '').trim();
     if (!desc) continue;
-    await c.run(
-      `INSERT INTO ${S}.requisition_items
-         (requisition_id, product_description, quantity, unit, size, purpose, fixed_rate, sort_order)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [
-        reqId,
-        desc,
-        parseFloat(it.quantity) || 0,
-        (it.unit || '').trim() || null,
-        (it.size || '').trim() || null,
-        (it.purpose || '').trim() || null,
-        it.fixed_rate !== undefined && it.fixed_rate !== '' ? parseFloat(it.fixed_rate) || 0 : null,
-        order++,
-      ]
+    const b = params.length;
+    params.push(
+      reqId,
+      desc,
+      parseFloat(it.quantity) || 0,
+      (it.unit || '').trim() || null,
+      (it.size || '').trim() || null,
+      (it.purpose || '').trim() || null,
+      it.fixed_rate !== undefined && it.fixed_rate !== '' ? parseFloat(it.fixed_rate) || 0 : null,
+      order++
     );
+    rows.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8})`);
   }
+  if (!rows.length) return;
+  await c.run(
+    `INSERT INTO ${S}.requisition_items
+       (requisition_id, product_description, quantity, unit, size, purpose, fixed_rate, sort_order)
+     VALUES ${rows.join(',')}`,
+    params
+  );
 }
 
 /** Full requisition with items, quotes (+ quote items), history and names. */
@@ -83,13 +90,20 @@ async function loadRequisition(id) {
       ORDER BY q.is_awarded DESC, q.total_amount`,
     [id]
   );
-  for (const q of quotes) {
-    q.item_rates = {};
-    const lines = await query(
-      `SELECT requisition_item_id, rate, amount FROM ${S}.requisition_quote_items WHERE quote_id = $1`,
-      [q.id]
+  for (const q of quotes) q.item_rates = {};
+  if (quotes.length) {
+    // One query for every quote's line-items instead of one-per-quote (N+1).
+    const byId = Object.fromEntries(quotes.map((q) => [String(q.id), q]));
+    const allLines = await query(
+      `SELECT quote_id, requisition_item_id, rate, amount
+         FROM ${S}.requisition_quote_items
+        WHERE quote_id IN (SELECT id FROM ${S}.requisition_quotes WHERE requisition_id = $1)`,
+      [id]
     );
-    for (const l of lines) q.item_rates[l.requisition_item_id] = { rate: l.rate, amount: l.amount };
+    for (const l of allLines) {
+      const q = byId[String(l.quote_id)];
+      if (q) q.item_rates[l.requisition_item_id] = { rate: l.rate, amount: l.amount };
+    }
   }
   req.quotes = quotes;
   req.history = await query(
@@ -304,37 +318,64 @@ router.post('/:id/source', requireRole('purchaser'), async (req, res, next) => {
     const awarded = b.awarded_vendor_id;
     if (!quotes.length) return res.status(400).json({ error: 'Add at least one vendor quote' });
     if (!awarded) return res.status(400).json({ error: 'Select the awarded (proposed) vendor' });
+    // The awarded vendor must be one of the compared vendors.
+    const postedVendorIds = new Set(quotes.filter((q) => q.vendor_id).map((q) => String(q.vendor_id)));
+    if (!postedVendorIds.has(String(awarded))) {
+      return res.status(400).json({ error: 'The awarded vendor must be one of the compared vendors' });
+    }
 
     const items = await query(
       `SELECT id, quantity FROM ${S}.requisition_items WHERE requisition_id = $1`,
       [r.id]
     );
     const qtyById = Object.fromEntries(items.map((i) => [i.id, Number(i.quantity) || 0]));
+    const validQuotes = quotes.filter((q) => q.vendor_id);
 
     await tx(async (c) => {
       await c.run(`DELETE FROM ${S}.requisition_quotes WHERE requisition_id = $1`, [r.id]);
-      for (const q of quotes) {
-        if (!q.vendor_id) continue;
+
+      // Insert all vendor quotes in one round-trip; map returned ids back by vendor.
+      const qParams = [];
+      const qRows = [];
+      for (const q of validQuotes) {
         let total = 0;
-        const rates = q.item_rates || {};
-        for (const [itemId, rate] of Object.entries(rates)) {
+        for (const [itemId, rate] of Object.entries(q.item_rates || {})) {
           total += (parseFloat(rate) || 0) * (qtyById[itemId] || 0);
         }
-        const isAwarded = String(q.vendor_id) === String(awarded);
-        const quoteRow = await c.one(
-          `INSERT INTO ${S}.requisition_quotes (requisition_id, vendor_id, is_awarded, total_amount, notes)
-           VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-          [r.id, q.vendor_id, isAwarded, +total.toFixed(2), (q.notes || '').trim() || null]
-        );
-        for (const [itemId, rate] of Object.entries(rates)) {
+        const base = qParams.length;
+        qParams.push(r.id, q.vendor_id, String(q.vendor_id) === String(awarded), +total.toFixed(2), (q.notes || '').trim() || null);
+        qRows.push(`($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5})`);
+      }
+      const insertedQuotes = qRows.length
+        ? await c.query(
+            `INSERT INTO ${S}.requisition_quotes (requisition_id, vendor_id, is_awarded, total_amount, notes)
+             VALUES ${qRows.join(',')} RETURNING id, vendor_id`,
+            qParams
+          )
+        : [];
+      const quoteIdByVendor = Object.fromEntries(insertedQuotes.map((row) => [String(row.vendor_id), row.id]));
+
+      // Insert all quote line-items in one round-trip.
+      const liParams = [];
+      const liRows = [];
+      for (const q of validQuotes) {
+        const quoteId = quoteIdByVendor[String(q.vendor_id)];
+        if (!quoteId) continue;
+        for (const [itemId, rate] of Object.entries(q.item_rates || {})) {
           const rt = parseFloat(rate) || 0;
-          await c.run(
-            `INSERT INTO ${S}.requisition_quote_items (quote_id, requisition_item_id, rate, amount)
-             VALUES ($1,$2,$3,$4)`,
-            [quoteRow.id, itemId, rt, +(rt * (qtyById[itemId] || 0)).toFixed(2)]
-          );
+          const base = liParams.length;
+          liParams.push(quoteId, itemId, rt, +(rt * (qtyById[itemId] || 0)).toFixed(2));
+          liRows.push(`($${base + 1},$${base + 2},$${base + 3},$${base + 4})`);
         }
       }
+      if (liRows.length) {
+        await c.run(
+          `INSERT INTO ${S}.requisition_quote_items (quote_id, requisition_item_id, rate, amount)
+           VALUES ${liRows.join(',')}`,
+          liParams
+        );
+      }
+
       await c.run(
         `UPDATE ${S}.requisitions
             SET status='sourced', proposed_vendor_id=$1, purchaser_id=$2, purchaser_note=$3

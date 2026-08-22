@@ -51,8 +51,11 @@ router.put('/:id', requireRole('admin'), async (req, res, next) => {
     const { name, role, active, password, department } = req.body || {};
     if (role && !ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
 
-    const demoting = (role && role !== 'admin') || active === false || active === 0;
-    if (user.role === 'admin' && demoting) {
+    // Normalise once so a falsy non-boolean active (null, "") can't slip past the guard.
+    const nextRole = role || user.role;
+    const nextActive = active !== undefined ? !!active : user.active;
+    const demoting = user.role === 'admin' && (nextRole !== 'admin' || (user.active && !nextActive));
+    if (demoting) {
       const admins = await one(`SELECT COUNT(*)::int AS n FROM ${S}.users WHERE role = 'admin' AND active = true`);
       if (admins.n <= 1) return res.status(400).json({ error: 'Cannot demote or deactivate the last active admin' });
     }
@@ -63,8 +66,8 @@ router.put('/:id', requireRole('admin'), async (req, res, next) => {
         WHERE id = $6 RETURNING id, name, email, role, department, active, created_at`,
       [
         name != null ? String(name).trim() : user.name,
-        role || user.role,
-        active !== undefined ? !!active : user.active,
+        nextRole,
+        nextActive,
         hash,
         department !== undefined ? (String(department).trim() || null) : user.department,
         user.id,

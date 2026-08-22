@@ -37,7 +37,12 @@ function money(n) {
 }
 function fmtDate(s) {
   if (!s) return '—';
-  const d = new Date(s.includes && s.includes('T') ? s : String(s).replace(' ', 'T') + (String(s).length <= 10 ? '' : 'Z'));
+  // Date-only values (YYYY-MM-DD) are stored raw to avoid timezone shifts, so
+  // build them from local parts instead of letting new Date() parse them as UTC.
+  const dOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s));
+  const d = dOnly
+    ? new Date(+dOnly[1], +dOnly[2] - 1, +dOnly[3])
+    : new Date(s.includes && s.includes('T') ? s : String(s).replace(' ', 'T') + (String(s).length <= 10 ? '' : 'Z'));
   if (isNaN(d)) return esc(s);
   return d.toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' });
 }
@@ -110,7 +115,7 @@ async function renderNav() {
   highlightNav();
 }
 function highlightNav() {
-  const cur = location.hash.split('/').slice(0, 2).join('/');
+  const cur = location.hash.split('?')[0].split('/').slice(0, 2).join('/');
   document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.getAttribute('href') === cur));
 }
 
@@ -134,9 +139,10 @@ function renderRaw(html) { $('#view').innerHTML = html; }
 async function router() {
   if (!State.user) return;
   const hash = location.hash || '#/dashboard';
+  const path = hash.split('?')[0]; // route on the path; views read the query themselves
   closeSidebar(); highlightNav();
   for (const r of routes) {
-    const m = hash.match(r.p);
+    const m = path.match(r.p);
     if (m) { try { await r.fn(m); } catch (e) { renderRaw(`<div class="empty"><div class="empty-icon">⚠️</div><p>${esc(e.message)}</p></div>`); } return; }
   }
   location.hash = '#/dashboard';
@@ -152,31 +158,36 @@ function closeSidebar() { $('.sidebar').classList.remove('open'); $('#scrim').cl
 async function viewDashboard() {
   setPage('Dashboard');
   loading();
-  const [{ byStatus }, mine, toSource, toApprove, toPo] = await Promise.all([
+  // Queue-card counts come from the status summary (submitted=To source,
+  // sourced=To approve, approved=Ready for PO), so we only fetch row lists we
+  // actually render: the caller's own requisitions and the one role focus list.
+  const focusScope = can('approver') ? 'to_approve' : can('purchaser') ? 'to_source' : null;
+  const [{ byStatus }, mine, focus] = await Promise.all([
     api('/requisitions/summary'),
     api('/requisitions?scope=mine'),
-    can('purchaser') ? api('/requisitions?scope=to_source') : Promise.resolve({ requisitions: [] }),
-    can('approver') ? api('/requisitions?scope=to_approve') : Promise.resolve({ requisitions: [] }),
-    can('store') ? api('/requisitions?scope=to_po') : Promise.resolve({ requisitions: [] }),
+    focusScope ? api(`/requisitions?scope=${focusScope}`) : Promise.resolve(null),
   ]);
   const sm = Object.fromEntries(byStatus.map((s) => [s.status, s.n]));
 
   const cards = [];
-  if (can('purchaser')) cards.push(queueCard('To source', toSource.requisitions.length, 'accent-primary', '#/requisitions?scope=to_source', 'requisitions waiting for vendor rates'));
-  if (can('approver')) cards.push(queueCard('Awaiting your approval', toApprove.requisitions.length, 'accent-warning', '#/requisitions?scope=to_approve', 'vendor proposals to approve'));
-  if (can('store')) cards.push(queueCard('Ready for PO', toPo.requisitions.length, 'accent-success', '#/requisitions?scope=to_po', 'approved — make PO in Tally'));
+  if (can('purchaser')) cards.push(queueCard('To source', sm.submitted || 0, 'accent-primary', '#/requisitions?scope=to_source', 'requisitions waiting for vendor rates'));
+  if (can('approver')) cards.push(queueCard('Awaiting your approval', sm.sourced || 0, 'accent-warning', '#/requisitions?scope=to_approve', 'vendor proposals to approve'));
+  if (can('store')) cards.push(queueCard('Ready for PO', sm.approved || 0, 'accent-success', '#/requisitions?scope=to_po', 'approved — make PO in Tally'));
   cards.push(queueCard('My requisitions', mine.requisitions.length, 'accent-info', '#/requisitions?scope=mine', 'raised by you'));
 
   const recent = mine.requisitions.slice(0, 8);
-  const focusList = (can('approver') ? toApprove.requisitions : can('purchaser') ? toSource.requisitions : mine.requisitions).slice(0, 8);
-  const focusTitle = can('approver') ? 'Awaiting your approval' : can('purchaser') ? 'To source' : 'My recent requisitions';
+  const focusList = (focus ? focus.requisitions : mine.requisitions).slice(0, 8);
+  const usingFocus = !!focusScope && focusList.length > 0;
+  const focusTitle = usingFocus
+    ? (can('approver') ? 'Awaiting your approval' : 'To source')
+    : 'My recent requisitions';
 
   renderRaw(`
     <div class="grid grid-4">${cards.join('')}</div>
     <div class="card" style="margin-top:20px">
       <h3>${esc(focusTitle)}</h3>
-      <p class="card-sub">Your action queue</p>
-      ${reqTable(focusList.length ? focusList : recent)}
+      <p class="card-sub">${usingFocus ? 'Your action queue' : 'Your latest requisitions'}</p>
+      ${reqTable(usingFocus ? focusList : recent)}
     </div>
     <div class="grid grid-4" style="margin-top:4px">
       ${['draft','submitted','sourced','approved','rejected','po_made'].map((s) => `

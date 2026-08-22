@@ -322,6 +322,8 @@ CREATE TABLE IF NOT EXISTS ${S}.requisition_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_${S}_req_status ON ${S}.requisitions(status);
+CREATE INDEX IF NOT EXISTS idx_${S}_req_created ON ${S}.requisitions(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_${S}_req_status_created ON ${S}.requisitions(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_${S}_req_items_req ON ${S}.requisition_items(requisition_id);
 CREATE INDEX IF NOT EXISTS idx_${S}_req_quotes_req ON ${S}.requisition_quotes(requisition_id);
 CREATE INDEX IF NOT EXISTS idx_${S}_price_list_cat ON ${S}.price_list(category);

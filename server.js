@@ -78,11 +78,14 @@ app.get(/^(?!\/api\/).*/, (req, res) => {
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   // eslint-disable-next-line no-console
-  console.error('[error]', err && err.message);
+  console.error('[error]', err && (err.stack || err.message));
   if (err && err.code === 'LIMIT_FILE_SIZE') {
     return res.status(413).json({ error: 'File is too large (max 5 MB)' });
   }
-  res.status((err && err.status) || 500).json({ error: (err && err.message) || 'Server error' });
+  const status = (err && err.status) || 500;
+  // Never leak internal/DB error text on 5xx; keep intentional 4xx messages.
+  const message = status >= 500 ? 'Server error' : (err && err.message) || 'Request failed';
+  res.status(status).json({ error: message });
 });
 
 // Only start a listener when run directly (local dev). On Vercel the app is
